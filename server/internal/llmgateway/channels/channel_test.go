@@ -16,6 +16,7 @@ func (s stubChannel) RequestOverrides(modelID string) (map[string]any, []string)
 	return map[string]any{"thinking": map[string]any{"type": "enabled"}}, []string{"temperature"}
 }
 func (s stubChannel) DefaultModelCaps() (int64, int64) { return 1048576, 393216 }
+func (s stubChannel) TransformRequestBody(body map[string]any) bool  { return false }
 
 func TestRegistryLookup(t *testing.T) {
 	Register(stubChannel{name: "stub", base: "http://stub"})

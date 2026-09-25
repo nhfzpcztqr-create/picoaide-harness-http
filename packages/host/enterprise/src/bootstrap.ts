@@ -40,6 +40,45 @@ export function maxOutputFromDefaultParams(raw: unknown): number | undefined {
 }
 
 /**
+ * Extract the context window from a model's `default_params` JSON
+ * (`{"context_length": N}`). The client uses `contextWindow` to drive
+ * automatic context compression and token budget estimation; without it
+ * every model falls back to the 1M default, which is wrong for smaller
+ * models and wastes compression headroom on large ones.
+ *
+ * Supports several equivalent keys to match community/legacy configs:
+ * `context_length`, `context_window`, `max_context_tokens`, `max_input`,
+ * `max_input_tokens`, `context`.
+ */
+export function contextWindowFromDefaultParams(raw: unknown): number | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>
+    const keys = [
+      'context_length',
+      'context_window',
+      'max_context_tokens',
+      'max_input',
+      'max_input_tokens',
+      'context',
+    ]
+    for (const k of keys) {
+      const v = value[k]
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 1024) {
+        return Math.floor(v)
+      }
+      if (typeof v === 'string') {
+        const n = Number(v.trim())
+        if (Number.isFinite(n) && n >= 1024) return Math.floor(n)
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Validate and project the server-delivered input modalities (0058).
  * Invalid/empty values yield undefined (the llm-deepseek settings schema then
  * defaults to text-only), so a misconfigured server can never inject an
@@ -75,11 +114,13 @@ export function apply(ctx: Context): void {
       await ctx.settings.update(LLM_DEEPSEEK_NS, {
         models: cfg.models.map((m) => {
           const maxTokens = maxOutputFromDefaultParams(m.default_params)
+          const contextWindow = contextWindowFromDefaultParams(m.default_params)
           const inputModalities = resolveInputModalities(m.input_modalities)
           return {
             id: m.id,
             name: m.display_name,
             ...maxTokens === undefined ? {} : { maxTokens },
+            ...contextWindow === undefined ? {} : { contextWindow },
             // 0058:图片支持配置随模型清单下发;缺失 = 仅 text(适配器据此
             // 拒绝图片输入,与服务端「配置未下发」时旧行为一致)。
             ...inputModalities === undefined ? {} : { inputModalities },

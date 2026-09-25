@@ -128,7 +128,7 @@ func TestApplyChannelOverrides(t *testing.T) {
 	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"temperature":0.7}`)
 	overrides := map[string]any{"thinking": map[string]any{"type": "enabled"}, "reasoning_effort": "max"}
 	removeKeys := []string{"temperature"}
-	out, err := (&API{}).applyChannelOverrides(body, overrides, removeKeys)
+	out, err := (&API{}).applyChannelOverrides(body, overrides, removeKeys, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

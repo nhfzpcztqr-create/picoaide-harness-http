@@ -154,11 +154,18 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
-				if raw2, err := a.applyChannelOverrides(body, ov, rm); err == nil {
+				if raw2, err := a.applyChannelOverrides(body, ov, rm, ch); err == nil {
 					body = raw2
 				} else if a.rejectBusyBodyEdit(c, usageID, err) {
 					return
 				}
+			}
+		} else if adapter, ok := thinkingAdapterFromDefaultParams(defaultParams); ok {
+			// 手动渠道 + 配置了思考适配器 → 应用参数转换
+			if raw2, err := a.applyThinkingAdapter(body, adapter); err == nil {
+				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		if defaultParams != "" {
@@ -311,6 +318,160 @@ func (a *API) applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, e
 	})
 }
 
+// --- 思考参数适配器(手动渠道模型用) ---
+//
+// 背景:客户端(DeepSeek 风格)统一用 thinking.type + reasoning_effort(off/low/high/max)
+// 控制思考模式,但不同模型厂商的参数名和档位不同。渠道型 Provider 通过 Channel 接口
+// 的 TransformRequestBody 做转换;手动型 Provider(channel="")则通过模型 default_params
+// 中的 _thinking_adapter 字段指定转换模式。
+//
+// 支持的适配器模式:
+//   - deepseek(默认/空):原样透传,不做转换
+//   - qwen:档位映射(off→none,low→low,high→medium,max→xhigh),
+//     删除 thinking 字段和 thinking_budget(与 reasoning_effort 互斥)
+//   - strip_open:精细化 strip——关闭时保留 reasoning_effort=none(确保关闭),
+//     开启档位时删除全部思考参数(让模型走自身默认行为)
+//   - strip_all:完全删除 thinking / reasoning_effort / thinking_budget,
+//     模型始终走默认配置
+
+// thinkingAdapterFromDefaultParams 从模型 default_params JSON 中提取
+// _thinking_adapter 值;不存在/解析失败时返回空串(= deepseek 模式,不转换)。
+func thinkingAdapterFromDefaultParams(params string) (string, bool) {
+	if params == "" {
+		return "", false
+	}
+	var p struct {
+		ThinkingAdapter string `json:"_thinking_adapter"`
+	}
+	if err := json.Unmarshal([]byte(params), &p); err != nil {
+		return "", false
+	}
+	if p.ThinkingAdapter == "" {
+		return "", false
+	}
+	return p.ThinkingAdapter, true
+}
+
+// qwenEffortMap:DeepSeek 档位 → Qwen 档位。
+var qwenEffortMap = map[string]string{
+	"off":  "none",
+	"low":  "low",
+	"high": "medium",
+	"max":  "xhigh",
+}
+
+// applyThinkingAdapter 按适配器模式转换请求体中的思考参数。
+// adapter 为空时直接返回原字节(零开销)。
+func (a *API) applyThinkingAdapter(raw []byte, adapter string) ([]byte, error) {
+	if adapter == "" || adapter == "deepseek" {
+		return raw, nil
+	}
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		// 解析当前思考状态
+		thinkingObj, _ := body["thinking"].(map[string]any)
+		thinkingType, _ := thinkingObj["type"].(string)
+		effort, _ := body["reasoning_effort"].(string)
+
+		// 是否处于"关闭"状态
+		off := thinkingType == "disabled" || effort == "off"
+
+		changed := false
+
+		switch adapter {
+		case "qwen":
+			// 档位映射 + 删 thinking + 删 thinking_budget
+			var finalEffort string
+			switch {
+			case off:
+				finalEffort = "none"
+			case effort != "":
+				if mapped, ok := qwenEffortMap[effort]; ok {
+					finalEffort = mapped
+				} else {
+					finalEffort = effort // 未知档位原样保留
+				}
+			default:
+				// 只开了 thinking 没传档位 → 不设 effort,走模型默认(xhigh)
+				finalEffort = ""
+			}
+			// 删除 thinking 字段
+			if _, has := body["thinking"]; has {
+				delete(body, "thinking")
+				changed = true
+			}
+			// 更新 reasoning_effort
+			if finalEffort != "" {
+				if body["reasoning_effort"] != finalEffort {
+					body["reasoning_effort"] = finalEffort
+					changed = true
+				}
+			}
+			// 删除 thinking_budget(互斥)
+			if _, has := body["thinking_budget"]; has {
+				delete(body, "thinking_budget")
+				changed = true
+			}
+
+		case "strip_open":
+			// 精细化 strip:关闭时保留 none,开启时删全部
+			if off {
+				// 删除 thinking 结构,保留 reasoning_effort=none
+				if _, has := body["thinking"]; has {
+					delete(body, "thinking")
+					changed = true
+				}
+				if body["reasoning_effort"] != "none" {
+					body["reasoning_effort"] = "none"
+					changed = true
+				}
+				// 删 thinking_budget
+				if _, has := body["thinking_budget"]; has {
+					delete(body, "thinking_budget")
+					changed = true
+				}
+			} else {
+				// 开启状态:删除所有思考参数,让模型走默认
+				if _, has := body["thinking"]; has {
+					delete(body, "thinking")
+					changed = true
+				}
+				if _, has := body["reasoning_effort"]; has {
+					delete(body, "reasoning_effort")
+					changed = true
+				}
+				if _, has := body["thinking_budget"]; has {
+					delete(body, "thinking_budget")
+					changed = true
+				}
+			}
+
+		case "strip_all":
+			// 完全删除所有思考参数
+			if _, has := body["thinking"]; has {
+				delete(body, "thinking")
+				changed = true
+			}
+			if _, has := body["reasoning_effort"]; has {
+				delete(body, "reasoning_effort")
+				changed = true
+			}
+			if _, has := body["thinking_budget"]; has {
+				delete(body, "thinking_budget")
+				changed = true
+			}
+
+		default:
+			// 未知适配器模式:不做转换
+			return errBodyNoChange
+		}
+
+		if !changed {
+			return errBodyNoChange
+		}
+		return nil
+	})
+}
+
 // applyStreamUsageRequest injects stream_options.include_usage=true into a
 // streaming chat request (P1-1, metering gap). Without it, upstreams omit the
 // final usage chunk in SSE responses by default, so the streaming path could
@@ -338,12 +499,35 @@ func (a *API) applyStreamUsageRequest(raw []byte) ([]byte, error) {
 }
 
 // applyChannelOverrides 深合并 overrides 进请求体,并删除 removeKeys 中的键。
-func (a *API) applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
+// ch 用于执行渠道级动态转换(如 Qwen 的思考参数映射),可为 nil(跳过转换)。
+func (a *API) applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string, ch channels.Channel) ([]byte, error) {
 	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
-		for _, k := range removeKeys {
-			delete(body, k)
+		changed := false
+
+		// 1. 渠道级动态请求体转换(如 Qwen 的 thinking 参数映射)
+		if ch != nil {
+			if ch.TransformRequestBody(body) {
+				changed = true
+			}
 		}
-		deepMerge(body, overrides)
+
+		// 2. 删除指定 key
+		for _, k := range removeKeys {
+			if _, ok := body[k]; ok {
+				delete(body, k)
+				changed = true
+			}
+		}
+
+		// 3. 深合并 overrides
+		if len(overrides) > 0 {
+			deepMerge(body, overrides)
+			changed = true
+		}
+
+		if !changed {
+			return errBodyNoChange
+		}
 		return nil
 	})
 }
