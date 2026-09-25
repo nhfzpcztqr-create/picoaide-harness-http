@@ -9,8 +9,8 @@ import type { Session } from './server-connector/config.ts'
 /** Stable Cordis plugin name. */
 export const name = 'bootstrap'
 
-/** Services consumed: settings writes and the session being synced. */
-export const inject = ['settings', 'picoSession']
+/** Services consumed: settings writes, the session being synced, and the LLM service for per-model reasoning patching. */
+export const inject = ['settings', 'picoSession', 'llm']
 
 const LLM_DEEPSEEK_NS = 'llm-deepseek' as SettingsNamespace
 const AGENT_DEFAULT_MODEL_NS = 'agent-default-model' as SettingsNamespace
@@ -92,17 +92,178 @@ export function resolveInputModalities(raw: unknown): string[] | undefined {
 }
 
 /**
+ * Per-model reasoning configuration shape returned by the LLM service's
+ * `resolveModelInfo`. Matches `LlmModelReasoningInfo` structurally (we avoid
+ * importing the branded type from the submodule since we cannot modify it).
+ */
+interface ResolvedReasoning {
+  efforts: Array<{ id: string; name: string; description?: string }>
+  defaultEffort?: string
+}
+
+/**
+ * Extract the thinking adapter mode string from a model's `default_params`
+ * JSON (`{"_thinking_adapter": "..."}`).
+ *
+ * Returns `undefined` when no adapter is configured (legacy behaviour — the
+ * adapter falls back to connection-level thinking / reasoningEffort).
+ */
+function thinkingAdapterFromDefaultParams(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>
+    const adapter = value._thinking_adapter
+    if (typeof adapter !== 'string' || adapter.length === 0) return undefined
+    return adapter
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Build a per-model reasoning configuration from an adapter mode string.
+ *
+ * Adapter modes and their UI presentation:
+ *   - `deepseek`:   4 levels — 关闭 / 低 / 高 / 最高
+ *   - `qwen`:       4 levels — 关闭 / 低 / 中 / 超高 (Qwen-style labels)
+ *   - `strip_open`:2 levels — 关闭 / 模型默认 (non-off all → model default)
+ *   - `strip_all`:  `null` → 模型始终走默认配置 (selector hidden)
+ *
+ * Returns `null` for `strip_open` (meaning "this model has no reasoning
+ * capability, hide the selector"), and `undefined` for unknown / unset
+ * adapters (meaning "fall back to connection-level default").
+ */
+function reasoningFromAdapter(adapter: string): ResolvedReasoning | null | undefined {
+  switch (adapter) {
+    case '__default__':
+      return {
+        efforts: [
+          { id: 'off', name: 'off', description: '简单任务，不使用推理' },
+          { id: 'low', name: 'low', description: '常规任务，优先速度' },
+          { id: 'high', name: 'high', description: '平衡质量与速度' },
+          { id: 'max', name: 'max', description: '复杂任务，优先质量' },
+        ],
+        defaultEffort: 'high',
+      }
+    case 'qwen':
+      return {
+        efforts: [
+          { id: 'off', name: 'off', description: '直接生成，不进行推理' },
+          { id: 'low', name: 'low', description: '效率优先，快速响应' },
+          { id: 'high', name: 'medium', description: '准确性与速度平衡' },
+          { id: 'max', name: 'xhigh', description: '深度推理，追求最优解' },
+        ],
+        defaultEffort: 'high',
+      }
+    case 'strip_open':
+      return {
+        efforts: [
+          { id: 'off', name: '关闭', description: '不使用推理，直接生成' },
+          { id: 'max', name: '模型默认', description: '使用模型默认推理深度' },
+        ],
+        defaultEffort: 'max',
+      }
+    case 'strip_all':
+      // null = no reasoning capability → UI hides the effort selector.
+      return null
+    default:
+      return undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-model thinking-adapter map & resolveModelInfo decoration.
+//
+// The deepseek-harness submodule cannot be modified, so we inject per-model
+// reasoning configuration by monkey-patching LlmRuntime.prototype.resolveModelInfo.
+// Prototype patching is used instead of ctx.llm decoration because Cordis
+// service references may differ across scopes, but the prototype is shared by
+// all instances. When the model catalog is built, each model's resolved info
+// carries our injected reasoning, and the UI model picker renders accordingly.
+// ---------------------------------------------------------------------------
+
+/**
+ * Map from model id → thinking adapter mode. Populated during bootstrap sync
+ * and read by the resolveModelInfo decorator.
+ */
+let modelThinkingAdapterMap: Map<string, string> = new Map()
+
+/** Guards against double-patching if the plugin is re-applied. */
+let perModelReasoningPatched = false
+
+/**
+ * Install the per-model reasoning patch on the LLM runtime prototype.
+ *
+ * We derive the prototype from the live `ctx.llm` instance via
+ * `Object.getPrototypeOf()`, which guarantees we patch the exact class copy
+ * the runtime actually uses — no risk of hitting a duplicate from transitive
+ * node_modules. Prototype patching affects every instance, including those
+ * created later, so both the session controller and any other consumers all
+ * see the per-model reasoning injection.
+ *
+ * Safe to call multiple times — only patches once.
+ * The `llm` service is declared in inject[], so it is guaranteed available.
+ */
+function installPerModelReasoning(ctx: Context): void {
+  if (perModelReasoningPatched) return
+  perModelReasoningPatched = true
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const llm = (ctx as unknown as Record<string, unknown>).llm as any
+  const proto = Object.getPrototypeOf(llm)
+
+  const originalResolve: (
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ) => Promise<Record<string, unknown>> = proto.resolveModelInfo
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  proto.resolveModelInfo = async function (
+    this: any,
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const info = await originalResolve.call(this, provider, model, signal)
+
+    const adapter = modelThinkingAdapterMap.get(model)
+    if (adapter === undefined) return info
+
+    const reasoning = reasoningFromAdapter(adapter)
+    if (reasoning === undefined) return info
+
+    if (reasoning === null) {
+      // strip-open: remove reasoning entirely → the model picker hides the
+      // effort selector for this model.
+      const { reasoning: _, ...rest } = info
+      return rest
+    }
+
+    return { ...info, reasoning }
+  }
+
+  ctx.logger?.info?.('[pico-bootstrap] per-model reasoning patch installed on llm prototype')
+}
+
+/**
  * Project a gateway session onto the DSH model settings: the gateway model
  * catalog drives the `llm-deepseek` models list, and the gateway default model
  * becomes the Agent default. Clearing the session resets both to composition
  * defaults.
  */
 export function apply(ctx: Context): void {
+  // Install the per-model reasoning patch on the LLM runtime prototype.
+  // The `llm` service is in inject[], so it is guaranteed available here.
+  installPerModelReasoning(ctx)
+
   const sync = async (session: Session | null): Promise<void> => {
+
     if (session === null) {
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {})
       await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
       await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_NS, {})
+      modelThinkingAdapterMap = new Map()
       return
     }
     try {
@@ -111,6 +272,22 @@ export function apply(ctx: Context): void {
       // connection.defaults.reasoningEffort 来自 settings(off|low|high|max),
       // 这是实际生效点;同时写 agent-default-model 保持 UI 展示一致。
       const reasoningEffort = cfg.web?.default_thinking_level
+
+      // 先更新 thinking adapter 映射(装饰 resolveModelInfo 用)。
+      // 必须在 settings.update 之前:settings.update 会触发
+      // settings/document-updated 事件,客户端据此刷新 catalog;
+      // 刷新时 resolveModelInfo 调用需要读到最新映射。
+      const nextMap = new Map<string, string>()
+      for (const m of cfg.models) {
+        const adapter = thinkingAdapterFromDefaultParams(m.default_params)
+        if (adapter !== undefined) nextMap.set(m.id, adapter)
+      }
+      modelThinkingAdapterMap = nextMap
+      ctx.logger?.info?.(
+        `[pico-bootstrap] thinking adapter map updated: ${nextMap.size} models configured ` +
+        `(${Array.from(nextMap.entries()).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'})`,
+      )
+
       await ctx.settings.update(LLM_DEEPSEEK_NS, {
         models: cfg.models.map((m) => {
           const maxTokens = maxOutputFromDefaultParams(m.default_params)

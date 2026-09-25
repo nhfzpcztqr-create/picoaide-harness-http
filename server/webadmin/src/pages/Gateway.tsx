@@ -1376,8 +1376,8 @@ export default function Gateway() {
                 <SelectContent>
                   <SelectItem value="__default__">默认(原样透传 / DeepSeek 风格)</SelectItem>
                   <SelectItem value="qwen">Qwen 模式(档位映射: off→none, high→medium, max→xhigh)</SelectItem>
-                  <SelectItem value="strip_open">精细化 Strip(关闭时保留 none,开启时走模型默认)</SelectItem>
-                  <SelectItem value="strip_all">完全 Strip(始终删除所有思考参数,走模型默认)</SelectItem>
+                  <SelectItem value="strip_open">Strip Open(关闭时保留 none,开启时走模型默认)</SelectItem>
+                  <SelectItem value="strip_all">Strip All(始终删除所有思考参数,走模型默认)</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
