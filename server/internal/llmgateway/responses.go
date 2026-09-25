@@ -100,6 +100,13 @@ func (a *API) handleResponses(c *gin.Context) {
 					return
 				}
 			}
+		} else if adapter, ok := thinkingAdapterFromDefaultParams(defaultParams); ok {
+			// 手动渠道 + 配置了思考适配器 → 应用参数转换
+			if raw2, err := a.applyThinkingAdapter(body, adapter); err == nil {
+				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
+			}
 		}
 		if defaultParams != "" {
 			if raw2, err := a.applyMaxTokensDefault(body, defaultParams); err == nil {

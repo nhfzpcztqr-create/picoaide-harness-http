@@ -511,21 +511,23 @@ export default function Gateway() {
   // 其余字段留空不覆盖
   const [editModel, setEditModel] = useState<Model | null>(null)
   // G1/G2: 模型编辑(价格 + 显示名/所属上游/default_params 结构化)。
-  function parseDefaultParams(raw: string): { contextLength: string; maxOutput: string; concurrencyTarget: string } {
+  function parseDefaultParams(raw: string): { contextLength: string; maxOutput: string; concurrencyTarget: string; thinkingAdapter: string } {
     try {
       const p = JSON.parse(raw) as Record<string, unknown>
       return {
         contextLength: typeof p.context_length === 'number' && p.context_length > 0 ? String(p.context_length) : '',
         maxOutput: typeof p.max_output === 'number' && p.max_output > 0 ? String(p.max_output) : '',
         concurrencyTarget: typeof p.concurrency_target === 'number' && p.concurrency_target > 0 ? String(p.concurrency_target) : '',
+        thinkingAdapter: typeof p._thinking_adapter === 'string' ? p._thinking_adapter : '',
       }
     } catch {
-      return { contextLength: '', maxOutput: '', concurrencyTarget: '' }
+      return { contextLength: '', maxOutput: '', concurrencyTarget: '', thinkingAdapter: '' }
     }
   }
   const [editModelForm, setEditModelForm] = useState({
     input: '', output: '', cache: '', offpeak: '', modalities: 'text',
     displayName: '', providerId: '', contextLength: '', maxOutput: '', concurrencyTarget: '',
+    thinkingAdapter: '',
     originalDefaultParams: '{}',
   })
   function openModelPricing(m: Model) {
@@ -540,6 +542,7 @@ export default function Gateway() {
       displayName: m.display_name,
       providerId: m.provider_id !== undefined && m.provider_id > 0 ? String(m.provider_id) : '',
       ...dp,
+      thinkingAdapter: dp.thinkingAdapter,
       originalDefaultParams: m.default_params || '{}',
     })
   }
@@ -582,6 +585,7 @@ export default function Gateway() {
       const changed = dp.contextLength !== editModelForm.contextLength.trim()
         || dp.maxOutput !== editModelForm.maxOutput.trim()
         || dp.concurrencyTarget !== editModelForm.concurrencyTarget.trim()
+        || dp.thinkingAdapter !== editModelForm.thinkingAdapter
       if (changed) {
         let merged: Record<string, unknown>
         try {
@@ -598,6 +602,8 @@ export default function Gateway() {
         if (cl === undefined) delete next.context_length; else next.context_length = cl
         if (mo === undefined) delete next.max_output; else next.max_output = mo
         if (ct === undefined) delete next.concurrency_target; else next.concurrency_target = ct
+        if (editModelForm.thinkingAdapter === '') delete (next as any)._thinking_adapter
+        else (next as any)._thinking_adapter = editModelForm.thinkingAdapter
         body.default_params = JSON.stringify(next)
       }
       await request(`${ADMIN_API}/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
@@ -1362,6 +1368,21 @@ export default function Gateway() {
                 <Input id="edit-conc" type="number" min={1} placeholder="如 100" value={editModelForm.concurrencyTarget}
                   onChange={(e) => setEditModelForm({ ...editModelForm, concurrencyTarget: e.target.value })} />
               </div>
+            </div>
+            <div className="space-y-1">
+              <Label>思考参数适配</Label>
+              <Select value={editModelForm.thinkingAdapter || '__default__'} onValueChange={(v) => setEditModelForm({ ...editModelForm, thinkingAdapter: v === '__default__' ? '' : v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">默认(原样透传 / DeepSeek 风格)</SelectItem>
+                  <SelectItem value="qwen">Qwen 模式(档位映射: off→none, high→medium, max→xhigh)</SelectItem>
+                  <SelectItem value="strip_open">精细化 Strip(关闭时保留 none,开启时走模型默认)</SelectItem>
+                  <SelectItem value="strip_all">完全 Strip(始终删除所有思考参数,走模型默认)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                仅手动渠道模型生效;渠道型模型(如 DeepSeek)按渠道自身规则处理。
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">

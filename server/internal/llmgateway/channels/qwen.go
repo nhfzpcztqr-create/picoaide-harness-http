@@ -108,7 +108,7 @@ func (q Qwen) TransformRequestBody(body map[string]any) bool {
 	return changed
 }
 
-// DefaultModelCaps:Qwen3.8 系列常见规格(128K 上下文,8K 输出)。
+// DefaultModelCaps:Qwen3.8 系列常见规格(256K 上下文,128K 输出)。
 func (q Qwen) DefaultModelCaps() (int64, int64) {
-	return 131072, 8192
+	return 262144, 131072
 }
