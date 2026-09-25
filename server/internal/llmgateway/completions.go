@@ -99,7 +99,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
-				if raw2, err := a.applyChannelOverrides(body, ov, rm); err == nil {
+				if raw2, err := a.applyChannelOverrides(body, ov, rm, ch); err == nil {
 					body = raw2
 				} else if a.rejectBusyBodyEdit(c, usageID, err) {
 					return

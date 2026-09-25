@@ -154,7 +154,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
-				if raw2, err := a.applyChannelOverrides(body, ov, rm); err == nil {
+				if raw2, err := a.applyChannelOverrides(body, ov, rm, ch); err == nil {
 					body = raw2
 				} else if a.rejectBusyBodyEdit(c, usageID, err) {
 					return
@@ -338,12 +338,35 @@ func (a *API) applyStreamUsageRequest(raw []byte) ([]byte, error) {
 }
 
 // applyChannelOverrides 深合并 overrides 进请求体,并删除 removeKeys 中的键。
-func (a *API) applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
+// ch 用于执行渠道级动态转换(如 Qwen 的思考参数映射),可为 nil(跳过转换)。
+func (a *API) applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string, ch channels.Channel) ([]byte, error) {
 	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
-		for _, k := range removeKeys {
-			delete(body, k)
+		changed := false
+
+		// 1. 渠道级动态请求体转换(如 Qwen 的 thinking 参数映射)
+		if ch != nil {
+			if ch.TransformRequestBody(body) {
+				changed = true
+			}
 		}
-		deepMerge(body, overrides)
+
+		// 2. 删除指定 key
+		for _, k := range removeKeys {
+			if _, ok := body[k]; ok {
+				delete(body, k)
+				changed = true
+			}
+		}
+
+		// 3. 深合并 overrides
+		if len(overrides) > 0 {
+			deepMerge(body, overrides)
+			changed = true
+		}
+
+		if !changed {
+			return errBodyNoChange
+		}
 		return nil
 	})
 }

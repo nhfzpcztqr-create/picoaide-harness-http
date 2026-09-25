@@ -48,6 +48,8 @@ ARG TARGETARCH=amd64
 # VERSION 由构建方注入(CI 传 git tag 去掉 v 前缀;本地默认 dev):
 #   cmd/server/main.go 的 var version = "dev",用 -X main.version=$VERSION 覆盖
 ARG VERSION=dev
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=$GOPROXY
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
@@ -98,6 +100,11 @@ RUN set -eu; mkdir -p /demo/packed \
 
 # --- Stage 3: 运行镜像(CA 证书用于 HTTPS 上游/LDAPS;entrypoint 降权;数据卷 0700) ---
 FROM alpine:3.21
+# 可选：构建时通过 --build-arg ALPINE_MIRROR=https://mirrors.aliyun.com/alpine 切换国内镜像
+ARG ALPINE_MIRROR
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories; \
+    fi
 # bubblewrap：WASM 应用平台编译子进程的 OS 级隔离（R31 / §15.1 第 14 条，
 # 唯一"读不可信字节且可能写宿主"的进程）。**读到的是白名单**：沙箱内 / 是空 tmpfs，
 # 只放行系统目录 + 模块目录 + 缓存目录（唯一可写），因此它读不到 master key、

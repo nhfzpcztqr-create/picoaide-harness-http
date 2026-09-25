@@ -42,3 +42,6 @@ func (d DeepSeek) RequestOverrides(modelID string) (map[string]any, []string) {
 
 // DefaultModelCaps:上下文 1M、输出 384K(deepseek 官方模型表)。
 func (d DeepSeek) DefaultModelCaps() (int64, int64) { return 1048576, 393216 }
+
+// TransformRequestBody DeepSeek 渠道参数与客户端原生一致,无需转换。
+func (DeepSeek) TransformRequestBody(body map[string]any) bool { return false }
