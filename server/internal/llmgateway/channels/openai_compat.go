@@ -41,10 +41,13 @@ func (OpenAICompat) RequestOverrides(string) (map[string]any, []string) { return
 
 func (OpenAICompat) DefaultModelCaps() (int64, int64) { return 131072, 8192 }
 
-// TransformRequest removes DeepSeek-only fields from ordinary OpenAI-compatible
+// TransformRequestBody removes DeepSeek-only fields from ordinary OpenAI-compatible
 // requests and maps the normalized thinking switch only when the selected
 // provider has a known compatible field.
-func (c OpenAICompat) TransformRequest(_, defaultParams string, body map[string]any) error {
+func (c OpenAICompat) TransformRequestBody(body map[string]any) bool {
+	changed := false
+
+	// 1. 展开 extra_body
 	if extra, ok := body["extra_body"].(map[string]any); ok {
 		for key, value := range extra {
 			if _, exists := body[key]; !exists {
@@ -52,16 +55,36 @@ func (c OpenAICompat) TransformRequest(_, defaultParams string, body map[string]
 			}
 		}
 		delete(body, "extra_body")
+		changed = true
 	}
-	enabled, configured := compatibleThinking(defaultParams, body)
-	budget := compatibleThinkingBudget(defaultParams, body)
-	delete(body, "thinking")
-	delete(body, "enable_thinking")
-	delete(body, "thinking_budget")
-	delete(body, "reasoning_effort")
+
+	// 2. 解析思考开关与档位
+	enabled, configured := parseThinkingFromBody(body)
+	budget := parseThinkingBudgetFromBody(body)
+
+	// 3. 删除通用字段
+	if _, hasThinking := body["thinking"]; hasThinking {
+		delete(body, "thinking")
+		changed = true
+	}
+	if _, hasEnable := body["enable_thinking"]; hasEnable {
+		delete(body, "enable_thinking")
+		changed = true
+	}
+	if _, hasBudget := body["thinking_budget"]; hasBudget {
+		delete(body, "thinking_budget")
+		changed = true
+	}
+	if _, hasEffort := body["reasoning_effort"]; hasEffort {
+		delete(body, "reasoning_effort")
+		changed = true
+	}
+
 	if !configured {
-		return nil
+		return changed
 	}
+
+	// 4. 按 mode 写入厂商特定字段
 	switch c.mode {
 	case "glm":
 		thinking := map[string]any{"type": "disabled"}
@@ -77,16 +100,17 @@ func (c OpenAICompat) TransformRequest(_, defaultParams string, body map[string]
 			body["thinking_budget"] = budget
 		}
 	}
-	return nil
+	return true
 }
 
-func compatibleThinking(defaultParams string, body map[string]any) (bool, bool) {
+// parseThinkingFromBody 从请求体中解析思考开关状态，仅基于 body 中已有的字段。
+func parseThinkingFromBody(body map[string]any) (enabled bool, configured bool) {
 	if value, ok := body["enable_thinking"].(bool); ok {
 		return value, true
 	}
 	if value, ok := body["thinking"].(map[string]any); ok {
-		if enabled, ok := value["enabled"].(bool); ok {
-			return enabled, true
+		if en, ok := value["enabled"].(bool); ok {
+			return en, true
 		}
 		switch strings.ToLower(strings.TrimSpace(stringValue(value["type"]))) {
 		case "enabled", "enable", "on", "true":
@@ -95,34 +119,17 @@ func compatibleThinking(defaultParams string, body map[string]any) (bool, bool) 
 			return false, true
 		}
 	}
-	if defaultParams == "" {
-		return false, false
-	}
-	var params struct {
-		Thinking *struct {
-			Enabled *bool `json:"enabled"`
-		} `json:"thinking"`
-	}
-	if json.Unmarshal([]byte(defaultParams), &params) == nil && params.Thinking != nil && params.Thinking.Enabled != nil {
-		return *params.Thinking.Enabled, true
+	if _, ok := body["reasoning_effort"].(string); ok {
+		// 传了 reasoning_effort 说明配置了思考
+		return true, true
 	}
 	return false, false
 }
 
-func compatibleThinkingBudget(defaultParams string, body map[string]any) int64 {
+// parseThinkingBudgetFromBody 从请求体中解析思考预算。
+func parseThinkingBudgetFromBody(body map[string]any) int64 {
 	if value, ok := numberValue(body["thinking_budget"]); ok && value > 0 {
 		return value
-	}
-	if defaultParams == "" {
-		return 0
-	}
-	var params struct {
-		Thinking *struct {
-			Budget int64 `json:"budget"`
-		} `json:"thinking"`
-	}
-	if json.Unmarshal([]byte(defaultParams), &params) == nil && params.Thinking != nil {
-		return params.Thinking.Budget
 	}
 	return 0
 }
