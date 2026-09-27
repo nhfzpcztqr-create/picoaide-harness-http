@@ -46,6 +46,8 @@ const (
 	PermPortalRead      = "portal:read"           // 门户首页
 	PermPortalWrite     = "portal:write"
 	PermServerInfoRead  = "server-info:read" // 服务器信息(含错误监控配置面,2026-09-08:删除零消费的 error-monitoring:read)
+	PermManagedRead     = "managed:read"     // 用户托管配置、Skill 策略和设备状态
+	PermManagedWrite    = "managed:write"    // 修改用户托管配置和 Skill 策略
 )
 
 // AllPermissions is the full permission set (super_admin).
@@ -60,7 +62,7 @@ var AllPermissions = []string{
 	PermConnectorRead, PermConnectorWrite,
 	PermAuditRead, PermAuditRetention,
 	PermPortalRead, PermPortalWrite,
-	PermServerInfoRead,
+	PermServerInfoRead, PermManagedRead, PermManagedWrite,
 }
 
 // AuditorPermissions is the read-only triple allowed to the auditor role.

@@ -5,6 +5,8 @@
 # + postgres(内置 PostgreSQL 18),一个文件直接部署:
 #
 #   cp .env.example .env && docker compose up -d
+# 纯 HTTP 模式:
+#   TLS_MODE=http docker compose -f docker-compose.yml -f docker-compose.http.yml up -d
 #
 # .env 必填(其余均有默认值,见下方变量说明):
 #   PICOAI_ADMIN_PASSWORD  首启超管密码(已有 admin 后幂等跳过,可置空清除明文)
@@ -15,12 +17,11 @@
 #   manual   → Caddyfile.manual   (自签占位/企业 CA;支持 IP)
 #   auto     → Caddyfile.autocert (Let's Encrypt 自动;需公网域名直连)
 #   internal → Caddyfile.internal (Caddy 本地 CA;纯内网开箱即用)
-# 2026-09-10 修复:此前 compose 拼接的是 ./Caddyfile.internal,而仓库里 internal
-# 模式的模板文件名是 Caddyfile —— TLS_MODE=internal 从未真正可用(挂载源不存在,
-# caddy 容器创建即失败)。三种模式现统一为 Caddyfile.<mode> 命名。
+#   http      → Caddyfile.http    (纯 HTTP;不暴露 443,明文传输)
+# 三种模式统一使用 Caddyfile.<mode> 命名；internal 是无证书纯内网部署的默认模式。
 #
 # 服务与固定 IP(容器重建后不变):
-#   caddy(172.28.0.2)  唯一对外入口,HTTPS 反代 + TLS 终结
+#   caddy(172.28.0.2)  唯一对外入口,HTTP/HTTPS 反代 + 可选 TLS 终结
 #   server(172.28.0.3) PicoAide 服务端,仅 expose 8080 内网可达
 #   postgres(172.28.0.4) 内置 PostgreSQL 18,不发布宿主机端口
 #
@@ -43,7 +44,7 @@ services:
     # 按 TLS_MODE 选择 Caddyfile 模板(默认 manual);域名用 {$DOMAIN} 在
     # Caddyfile 内插值,模板内无需写死域名
     volumes:
-      - ./Caddyfile.${TLS_MODE:-manual}:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile.${TLS_MODE:-internal}:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
       - ./caddy-data:/data
       - ./caddy-config:/config
@@ -97,12 +98,12 @@ services:
       # docker 网桥网关,如 172.20.0.1)。
       PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-172.28.0.2}
       # 本服务端对外可达地址(如 https://ai.example.com)。**配了就是唯一权威**;
-      # 留空则按请求推导(X-Forwarded-Proto: https → TLS → 回环 http)。
-      # 为什么要配:客户端更新清单里的下载地址必须是**绝对 https**,而客户端会
-      # 丢弃非 https 的整份清单。若前面挂的是不设 X-Forwarded-Proto 的反代,
-      # 或服务端在反代后面判断不出协议,清单会按设计拒发 client 段
-      # (`client_unavailable`),表现为"检查更新永远说已是最新"。
+      # 留空则按请求推导(X-Forwarded-Proto/TLS/Host)。
+      # 客户端更新清单的下载地址必须是绝对 http(s)；纯 HTTP 模式下使用 http。
+      # 若服务端判断不出 Host,清单会按设计拒发 client 段(`client_unavailable`)。
       PICOAI_PUBLIC_BASE_URL: ${PICOAI_PUBLIC_BASE_URL:-}
+      # 自助注册默认开启；新账号仅进入待审核状态，不会直接登录或获得管理员权限。
+      PICOAI_SELF_REGISTRATION_ENABLED: ${PICOAI_SELF_REGISTRATION_ENABLED:-1}
       # ---- WASM 应用平台（员工自建应用）----
       # 应用访问模型（2026-09-19 起）：应用只在桌面客户端内打开 —— 客户端**应用窗口**
       # 加载自定义协议地址 <渠道 app 源 scheme>://<app_id>/（scheme 随渠道配置），由客户端转发到服务端唯一入口

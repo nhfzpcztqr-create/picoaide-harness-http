@@ -40,12 +40,21 @@ func ListModels(db *sql.DB) ([]Model, error) {
 			return err
 		}
 		defer rows.Close()
+		ms = []Model{}
+		seen := make(map[string]struct{})
 		for rows.Next() {
 			var m Model
 			var modalities string
 			if err := rows.Scan(&m.ID, &m.DisplayName, &m.DefaultParams, &modalities); err != nil {
 				return err
 			}
+			// The same model can be exposed by multiple enabled providers. The
+			// client catalog is keyed by id, so publish one stable entry instead of
+			// making the desktop adapter reject the entire settings section.
+			if _, ok := seen[m.ID]; ok {
+				continue
+			}
+			seen[m.ID] = struct{}{}
 			m.InputModalities = serverstore.ParseInputModalities(modalities)
 			ms = append(ms, m)
 		}

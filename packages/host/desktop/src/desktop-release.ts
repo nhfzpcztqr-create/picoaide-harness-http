@@ -46,7 +46,7 @@ function trimTrailingSlashes(value: string): string {
 
 /**
  * 组装服务端的版本清单地址。
- * @param serverURL - 已登录的服务端地址（调用方负责 https/回环校验）。
+ * @param serverURL - 已登录的服务端地址（调用方负责 HTTP(S) 校验）。
  * @returns 绝对 URL。
  */
 export function serverManifestURL(serverURL: string): string {
@@ -121,8 +121,9 @@ const SHA256_HEX = /^[0-9a-f]{64}$/u
 /**
  * 严格解析版本清单。任何结构不符都返回 null（调用方静默降级为「无更新」）。
  *
- * 只接受**绝对 https** URL 与非空 sha256：清单是安全边界 —— 拼接式下载地址
- * 与缺失哈希（等于放弃完整性校验）都必须拒绝，而不是尽力猜测。
+ * 接受绝对 HTTP(S) URL 与非空 sha256：清单是完整性边界 —— 拼接式下载地址
+ * 与缺失哈希（等于放弃完整性校验）都必须拒绝，而不是尽力猜测。HTTP 仅适用于
+ * 管理员明确隔离的内网部署，传输机密性由部署网络而不是客户端保证。
  *
  * `channel_id` **必填**，且给了 `expectedChannel` 时必须精确相等：渠道隔离是
  * 正确性要求 —— 品牌客户端若接受官方渠道的清单，升级后会被"洗"成官方客户端、
@@ -155,7 +156,7 @@ export function parseReleaseManifest(
     if (entry === undefined) continue
     if (!isRecord(entry)) return null
     const { url, sha256, size } = entry
-    if (typeof url !== 'string' || !isHttpsURL(url)) return null
+    if (typeof url !== 'string' || !isHttpURL(url)) return null
     if (typeof sha256 !== 'string' || !SHA256_HEX.test(sha256)) return null
     if (size !== undefined && (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0)) {
       return null
@@ -175,7 +176,7 @@ export function parseReleaseManifest(
 /**
  * 读取清单里的"服务端给不出下载地址"说明（`client_unavailable`）。
  *
- * 服务端在**推不出安全（https）对外地址**时不下发 `client` 段，而是给一个原因
+ * 服务端在**推不出可访问对外地址**时不下发 `client` 段，而是给一个原因
  * （见 server 的 `internal/clientrelease`）—— 那与"没有新版本"是两件事：前者要
  * 提示用户/管理员去修配置，后者才是"已是最新"。只认非空字符串，其余一律 undefined。
  * @param input - 清单 JSON（`JSON.parse` 之后）。
@@ -187,9 +188,10 @@ export function readClientUnavailableReason(input: unknown): string | undefined 
   return typeof reason === 'string' && reason.trim() !== '' ? reason.trim() : undefined
 }
 
-function isHttpsURL(value: string): boolean {
+function isHttpURL(value: string): boolean {
   try {
-    return new URL(value).protocol === 'https:'
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
   } catch {
     return false
   }

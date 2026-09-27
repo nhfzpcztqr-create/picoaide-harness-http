@@ -113,15 +113,21 @@ func (e *Embedder) EmbedWithProvider(ctx context.Context, model string, texts []
 	var lastErr error
 	for i := range ups {
 		lastErr = nil // a fresh provider must not inherit a previous failure
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURLFor(ups[i].BaseURL, "/embeddings"), bytes.NewReader(body))
+		attempt, lease, keyErr := (&API{DB: e.db, keyPool: newProviderKeyPool(e.db)}).upstreamWithKey(ups[i])
+		if keyErr != nil {
+			lastErr = keyErr
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURLFor(attempt.BaseURL, "/embeddings"), bytes.NewReader(body))
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+ups[i].APIKey)
+		req.Header.Set("Authorization", "Bearer "+attempt.APIKey)
 		resp, err := e.client.Do(req)
 		if err != nil {
+			recordLeaseResponse(lease, nil, err)
 			lastErr = err
 			log.Printf("gateway: embed model %s provider %q failed: %v", safeModelForLog(model), ups[i].Name, err)
 			continue
@@ -133,9 +139,11 @@ func (e *Embedder) EmbedWithProvider(ctx context.Context, model string, texts []
 			continue
 		}
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			recordLeaseResponse(lease, resp, nil)
 			return nil, 0, 0, fmt.Errorf("embedding upstream %d", resp.StatusCode)
 		}
 		if resp.StatusCode >= 500 {
+			recordLeaseResponse(lease, resp, nil)
 			lastErr = fmt.Errorf("embedding upstream %d", resp.StatusCode)
 			log.Printf("gateway: embed model %s provider %q: %d", safeModelForLog(model), ups[i].Name, resp.StatusCode)
 			continue
@@ -168,6 +176,7 @@ func (e *Embedder) EmbedWithProvider(ctx context.Context, model string, texts []
 		if lastErr != nil {
 			continue
 		}
+		recordLeaseResponse(lease, resp, nil)
 		// P0-B(审计 2026-09-12):上游回报的负 token 归零(否则负费用 →
 		// refund → 余额凭空增加;响应体回显的 usage 也会是负数)。
 		// N2(审计 r3 第四轮):embedding 的用量就是输入侧 —— 只报

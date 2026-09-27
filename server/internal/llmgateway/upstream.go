@@ -93,6 +93,7 @@ type Upstream struct {
 	Name     string
 	BaseURL  string
 	APIKey   string
+	Keys     []UpstreamKey
 	Models   []string
 	Channel  string
 	Protocol string
@@ -146,6 +147,26 @@ func loadUpstreamsDB(db *sql.DB) ([]Upstream, error) {
 				continue
 			}
 			u.APIKey = key
+			// The legacy provider key remains the fallback. A key pool is selected
+			// per request so cooldown state can change without rebuilding the route cache.
+			if keyRows, keyErr := tx.Query(`SELECT id, api_key_enc FROM gateway_provider_api_keys WHERE provider_id = ? AND enabled = 1 ORDER BY priority, id`, r.id); keyErr == nil {
+				for keyRows.Next() {
+					var kid int64
+					var kenc string
+					if scanErr := keyRows.Scan(&kid, &kenc); scanErr != nil {
+						continue
+					}
+					plain, decryptErr := DecryptSecret(kenc)
+					if decryptErr != nil {
+						log.Printf("gateway: skip key %d for provider %s: decrypt api key: %v", kid, u.Name, decryptErr)
+						continue
+					}
+					u.Keys = append(u.Keys, UpstreamKey{ID: kid, Key: plain})
+				}
+				keyRows.Close()
+			} else {
+				log.Printf("gateway: load key pool for provider %s: %v", u.Name, keyErr)
+			}
 			if u.Protocol != "anthropic" && u.Protocol != "openai" && u.Protocol != "both" {
 				// 未知协议(防御):不参与任何路由,与损坏 key 同档处理
 				log.Printf("gateway: skip provider %s: unknown protocol %q", u.Name, u.Protocol)

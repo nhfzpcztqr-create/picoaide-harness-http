@@ -1,0 +1,18 @@
+# ============================================================
+# PicoAide 服务端 Caddyfile — 纯 HTTP 内网模式
+# ============================================================
+# 用途:完全隔离、明确接受明文传输风险的内网环境。
+# 监听所有 Host。HTTP 内网部署经常会同时通过服务器 IP、主机名和 hosts 别名访问；
+# 如果把 DOMAIN 写死在站点地址里，Host 不一致时 Caddy 会返回空响应，客户端只会看到
+# “Unexpected end of JSON input”。对外可达地址仍由 PICOAI_PUBLIC_BASE_URL 控制。
+# 这里显式使用 :80，Caddy 不会自动启用 HTTPS 或 80→443 跳转。
+# 安全提醒:登录凭据、Token、Prompt、Response 和管理操作会以明文经过网络。
+# ============================================================
+:80 {
+	reverse_proxy server:8080 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+		flush_interval -1
+	}
+}

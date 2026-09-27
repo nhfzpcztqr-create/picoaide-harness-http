@@ -276,9 +276,9 @@ export interface DesktopChannelProfile {
 /**
  * 判定渠道包里的服务端地址是否可接受。
  *
- * 与 auth-gate 的用户输入校验同一口径：**必须 https，回环地址允许 http**
- * （内网自签/本机调试）。渠道包是自家构建产物，但仍然校验 —— 防的是渠道配置
- * 写错把整批客户端指向明文端点，而不是防攻击者。
+ * 与 auth-gate 的用户输入校验同一口径：允许 HTTP/HTTPS。
+ * HTTP 适用于明确隔离的内网部署；渠道包是自家构建产物，但仍然校验协议，避免
+ * 配置写错把整批客户端指向 file、ftp 等非 HTTP 端点。
  * @param value - 渠道包里的 `defaults.server_url`。
  * @returns 可接受时返回规范化后的地址（去尾斜杠）；否则 undefined。
  */
@@ -293,11 +293,7 @@ export function normalizeDefaultServerURL(value: unknown): string | undefined {
   } catch {
     return undefined
   }
-  if (parsed.protocol === 'https:') return trimmed
-  if (parsed.protocol !== 'http:') return undefined
-  const host = parsed.hostname
-  const loopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1'
-  return loopback ? trimmed : undefined
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? trimmed : undefined
 }
 
 /** 取非空字符串（渠道包字段可能缺失或类型不对）。 */

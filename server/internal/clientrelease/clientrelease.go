@@ -14,7 +14,6 @@ package clientrelease
 import (
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -123,10 +122,9 @@ func manifest(c *gin.Context, serverVersion, channel string) {
 		"channel_id": channel,
 		"server":     gin.H{"version": serverVersion},
 	}
-	// 下载地址按请求来源拼出,不写死 —— 官方 HTTPS 与内网自签/非 443 端口都对。
-	// 但客户端只接受**绝对 https** 地址(见 packages/host/desktop 的
-	// desktop-release.ts):给不出安全地址时宁可明说不可用,也不下发一个会被
-	// 整份丢弃、客户端静默显示"已是最新"的 http 链接。
+	// 下载地址按请求来源拼出,不写死 —— HTTP 与 HTTPS 部署都支持。
+	// HTTP 是显式的内网兼容模式：部署者需要自行保证链路隔离与审计数据的
+	// 访问控制，客户端不会再因为下载地址是 http 而静默丢弃整份清单。
 	origin := RequestOrigin(c)
 	info := LoadInfo()
 	switch {
@@ -292,22 +290,22 @@ func allowedAssetName(name string) bool {
 }
 
 // PublicBaseURLEnv 显式声明本服务端对外可达地址的环境变量(如
-// https://ai.example.com,允许带子路径)。配置后是下载地址的**唯一权威来源**。
+// http(s)://ai.example.com,允许带子路径)。配置后是下载地址的**唯一权威来源**。
 const PublicBaseURLEnv = "PICOAI_PUBLIC_BASE_URL"
 
-// originUnavailableReason 是"给不出安全下载地址"时的兜底原因说明
+// originUnavailableReason 是"给不出可访问下载地址"时的兜底原因说明
 // (下发给客户端/体现在服务端日志里,供运维定位)。
-const originUnavailableReason = "server origin is not https; set " + PublicBaseURLEnv
+const originUnavailableReason = "server origin is unavailable; set " + PublicBaseURLEnv
 
 // Origin 是客户端可达的绝对来源解析结果。
 type Origin struct {
-	// Base 形如 https://ai.example.com[/sub];不可用时为空。
+	// Base 形如 http(s)://ai.example.com[/sub];不可用时为空。
 	Base string
 	// Reason 不可用的原因(不含任何链接,可直接展示给运维);可用时为空。
 	Reason string
 }
 
-// OK 报告是否拿到了可下发的安全来源。
+// OK 报告是否拿到了可下发的来源。
 func (o Origin) OK() bool { return o.Base != "" }
 
 // 来源告警出口与"只告警一次"闸(测试可替换/重置)。
@@ -345,7 +343,7 @@ func RequestOrigin(c *gin.Context) Origin {
 // URL(no-store 已挡住缓存投毒,但配置了对外地址时应以配置为权威)。
 var PublicBaseResolver func() string
 
-// configuredBaseURL 读取显式配置的对外地址(只接受 https/回环 http)。
+// configuredBaseURL 读取显式配置的对外地址(接受 http/https)。
 func configuredBaseURL() string {
 	if PublicBaseResolver == nil {
 		return ""
@@ -355,7 +353,7 @@ func configuredBaseURL() string {
 		return ""
 	}
 	base, ok := normalizeBaseURL(raw)
-	if !ok || !isSecureBase(base) {
+	if !ok {
 		return ""
 	}
 	return base
@@ -373,16 +371,13 @@ type originInput struct {
 
 // resolveOrigin 判定客户端可达来源。
 //
-// 优先级:显式配置(PICOAI_PUBLIC_BASE_URL,配了就是唯一权威)→ XFP:https
-// → TLS → 回环 Host(http,本地开发)→ 无法提供安全地址。
+// 优先级:显式配置(PICOAI_PUBLIC_BASE_URL,配了就是唯一权威)→ XFP
+// → TLS → HTTP 请求 Host → 无法提供可访问地址。
 func resolveOrigin(in originInput) Origin {
 	if raw := strings.TrimSpace(os.Getenv(PublicBaseURLEnv)); raw != "" {
 		base, ok := normalizeBaseURL(raw)
 		if !ok {
 			return Origin{Reason: PublicBaseURLEnv + " is invalid: expect an absolute http(s) URL without query or fragment"}
-		}
-		if !isSecureBase(base) {
-			return Origin{Reason: PublicBaseURLEnv + " must be https (the client rejects non-https download URLs)"}
 		}
 		return Origin{Base: base}
 	}
@@ -396,7 +391,7 @@ func resolveOrigin(in originInput) Origin {
 	if in.ForwardedProto == "https" || in.TLS {
 		return Origin{Base: "https://" + in.Host}
 	}
-	if isLoopbackHost(in.Host) {
+	if in.ForwardedProto == "http" || in.Host != "" {
 		return Origin{Base: "http://" + in.Host}
 	}
 	return Origin{Reason: originUnavailableReason}
@@ -413,36 +408,6 @@ func normalizeBaseURL(raw string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimRight(raw, "/"), true
-}
-
-// isSecureBase 判定来源是否安全:https 恒安全;http 仅回环(本地开发)可接受。
-func isSecureBase(base string) bool {
-	u, err := url.Parse(base)
-	if err != nil {
-		return false
-	}
-	if u.Scheme == "https" {
-		return true
-	}
-	return isLoopbackHost(u.Host)
-}
-
-// isLoopbackHost 判定 host(可含端口,IPv6 可带方括号)是否为本机回环。
-func isLoopbackHost(host string) bool {
-	switch hostOnly(host) {
-	case "127.0.0.1", "localhost", "::1":
-		return true
-	}
-	return false
-}
-
-// hostOnly 去掉端口与 IPv6 方括号(如 "127.0.0.1:8080" → "127.0.0.1")。
-func hostOnly(hostport string) string {
-	h := strings.TrimSpace(hostport)
-	if host, _, err := net.SplitHostPort(h); err == nil {
-		h = host
-	}
-	return strings.Trim(strings.ToLower(h), "[]")
 }
 
 // LoadInfo 读并解析资产清单;不存在或损坏时返回 nil(镜像可不带客户端)。

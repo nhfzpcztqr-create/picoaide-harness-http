@@ -44,6 +44,8 @@ export const PERM_SERVERINFO_READ = 'server-info:read'
 export const PERM_AUDIT_READ = 'audit:read'
 /** 报表订阅列表(hook_url 是凭据本体;服务端**刻意**不发给 auditor,见 rbac.go)。 */
 export const PERM_REPORT_READ = 'report:read'
+export const PERM_MANAGED_READ = 'managed:read'
+export const PERM_MANAGED_WRITE = 'managed:write'
 
 // 当前登录管理员的模块级快照:App 在 /me 成功后写入(见 App.tsx),页面用
 // hasPermission 做"体验层"判定 —— 隐藏拿不到的入口、**不请求必然 403 的接口**。

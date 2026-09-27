@@ -330,6 +330,8 @@ export function apply(ctx: Context, config: Config): void {
     let expectedChannel: string | undefined
     /** 渠道内容是否已为本会话取过（失败也标记，避免每次检查都重试）。 */
     let channelResolved = false
+    /** 登录或切换服务端后立即安排一次后台检查。 */
+    let requestImmediateBackgroundCheck: (() => void) | undefined
 
     /** 从会话载荷里取服务端地址（防御式:事件来自别的包，字段可能缺失）。 */
     const serverURLOf = (session: unknown): string | null => {
@@ -382,6 +384,7 @@ export function apply(ctx: Context, config: Config): void {
         publishState()
         // 换源后立刻为这一台服务端做一次复用检查,别等下一次轮询。
         void reuseDownloadedInstaller()
+        if (next !== null) requestImmediateBackgroundCheck?.()
       } catch {
         // 会话切换时的状态重置失败不影响宿主;下一次检查会重新推导更新源。
       }
@@ -931,6 +934,13 @@ export function apply(ctx: Context, config: Config): void {
           if (!disposed) scheduleBackgroundCheck(config.intervalMs)
         })
       }, delayMs)
+    }
+
+    requestImmediateBackgroundCheck = (): void => {
+      if (!adapter.isPackaged || !config.enabled || disposed) return
+      if (pollTimer !== undefined) clearTimeout(pollTimer)
+      pollTimer = undefined
+      scheduleBackgroundCheck(0)
     }
 
     const registration = ctx.desktopRuntime.registerTrayItem({

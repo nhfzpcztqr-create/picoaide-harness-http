@@ -8,6 +8,13 @@ TAG ?= latest
 CHANNEL ?= official
 # 注入镜像内 --version 的版本号(默认取 git describe;可显式覆盖 VERSION=0.4.0)
 VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
+PLATFORM ?= linux/amd64
+OFFLINE_BUILD ?= 0
+RUNTIME_BASE ?= alpine:3.21
+GO_MODULE_CACHE ?= ./.offline-go-modcache
+NPM_CACHE ?= ./.offline-npm-cache
+CLIENT_ASSETS ?= ./client-assets
+CHANNEL_CONTEXT ?= ./channels-context
 
 # 客户端已下线(2026-08):仓库只保留服务端接口 + webadmin 管理端。
 # 测试/构建入口收敛为:test-server / webadmin / build-server / docker-image / check。
@@ -115,24 +122,27 @@ webadmin:
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
 #      CHANNEL=<渠道 id>(缺省 official;渠道内容取 channels-context/<id>/)
 #
-# **两个命名构建上下文是必需的**(2026-09-23 审计 K-05):Dockerfile 里
+# **四个命名构建上下文是必需的**:Dockerfile 里
 # `COPY --from=clientassets …`(客户端安装包随镜像分发)与
 # `COPY --from=channelassets …`(渠道内容)。`COPY --from=<name>` 的 <name> 若不是
 # stage、也不是用户命名上下文,BuildKit 会把它当**镜像引用**去拉取 —— 于是
 # `docker build .` 会停在"拉取 clientassets"上(报错完全不指向真实原因,本项目历史上
-# 正是被 Docker Hub 可达性坑过)。两个目录**允许为空**(语义 = 本地镜像不带客户端/渠道
+# 正是被 Docker Hub 可达性坑过)。客户端与渠道目录**允许为空**(语义 = 本地镜像不带客户端/渠道
 # 内容,服务端回落内置文案),但目录必须存在:目录形式的 COPY 对空目录合法,对**不存在**
-# 的目录直接构建失败。
+# 的目录直接构建失败。Go/npm cache 上下文也必须传;联网构建可传空目录。
 docker-image:
 	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION) CHANNEL=$(CHANNEL))"
 	@# 内置技能资产（镜像内 /opt/picoaide/skills）就在本构建上下文里：
 	@# server/skills/<name>/ —— 随镜像分发，客户端在能力中心按需安装。
 	@# 曾经用 --build-context skillassets=../packages/vendor/memory-evolve 从
 	@# 客户端 vendored 插件包取，2026-09-19 起源头归位服务端，不再需要该上下文。
-	@mkdir -p client-assets/client "channels-context/$(CHANNEL)"
-	docker build --build-arg VERSION=$(VERSION) --build-arg CHANNEL=$(CHANNEL) \
-	  --build-context clientassets=./client-assets \
-	  --build-context channelassets=./channels-context \
+	@mkdir -p "$(CLIENT_ASSETS)/client" "$(CHANNEL_CONTEXT)/$(CHANNEL)" "$(GO_MODULE_CACHE)" "$(NPM_CACHE)"
+	docker build --platform $(PLATFORM) --build-arg VERSION=$(VERSION) --build-arg CHANNEL=$(CHANNEL) \
+	  --build-arg OFFLINE_BUILD=$(OFFLINE_BUILD) --build-arg RUNTIME_BASE=$(RUNTIME_BASE) \
+	  --build-context clientassets=$(CLIENT_ASSETS) \
+	  --build-context channelassets=$(CHANNEL_CONTEXT) \
+	  --build-context gomodcache=$(GO_MODULE_CACHE) \
+	  --build-context npmcache=$(NPM_CACHE) \
 	  -t $(IMAGE):$(TAG) .
 
 # 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,

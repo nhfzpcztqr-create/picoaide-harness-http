@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,8 @@ type API struct {
 	limiter *loginLimiter
 	// loginIPLimiter:登录/回调的单 IP 失败预算桶(P1-2/P1-3 审计 2026-09-13)。
 	loginIPLimiter *loginLimiter
+	// registrationLimiter bounds public self-registration attempts per IP.
+	registrationLimiter *loginLimiter
 	// callbackLimiter:OIDC 回调专用 IP 桶(2026-09-08 P0-2)。
 	callbackLimiter *loginLimiter
 	// oidcFlowLimiter:OIDC **流程启动**专用 IP 桶(审计 2026-09-23 R5-A-18)。
@@ -110,15 +113,42 @@ func SessionKey(rawToken string) string {
 // New creates the auth API.
 func New(db *sql.DB) *API {
 	return &API{
-		DB:               db,
-		limiter:          sharedLoginLimiter(),
-		loginIPLimiter:   sharedLoginIPLimiter(),
-		callbackLimiter:  newCallbackLimiter(),
+		DB:                  db,
+		limiter:             sharedLoginLimiter(),
+		loginIPLimiter:      sharedLoginIPLimiter(),
+		registrationLimiter: newRateLimiter(10),
+		callbackLimiter:     newCallbackLimiter(),
 		oidcFlowLimiter:  newRateLimiter(oidcFlowStartMaxAttempts),
 		providers:        map[string]PasswordProvider{},
 		browsers:         map[string]BrowserProvider{},
 		enabledProviders: map[string]bool{},
 	}
+}
+
+const selfRegistrationEnabledEnv = "PICOAI_SELF_REGISTRATION_ENABLED"
+
+func selfRegistrationEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(selfRegistrationEnabledEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func localClientAuthEnabled(settings map[string]string) bool {
+	enabledRaw := strings.TrimSpace(settings["auth.enabled"])
+	if enabledRaw != "" {
+		for _, name := range strings.Split(enabledRaw, ",") {
+			if strings.TrimSpace(name) == "local" {
+				return true
+			}
+		}
+		return false
+	}
+	// Keep the legacy/default mode semantics used by getPublicAuthMethods:
+	// local remains available unless explicitly removed via auth.enabled.
+	return true
 }
 
 // OIDCFlowCapacityRejections 返回**因平台自身容量**被拒的 OIDC 流程启动次数
@@ -402,6 +432,81 @@ func (a *API) handleLogin(c *gin.Context) {
 		// 0057: 管理员重置密码后强制改密, 客户端须进入强制改密态。
 		"must_change_password": user.PasswordMustChange,
 	})
+}
+
+func (a *API) handleRegister(c *gin.Context) {
+	if !selfRegistrationEnabled() {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "自助注册未启用")
+		return
+	}
+	settings, err := serverstore.GetAllSettings(a.DB)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "注册配置读取失败")
+		return
+	}
+	if !localClientAuthEnabled(settings) || settings["auth.hide_local"] == "true" {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "本地账号注册未启用")
+		return
+	}
+	key := dbLimiterScope(a.DB) + "register|" + clientIPKey(c)
+	if !a.registrationLimiter.allow(key) {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "注册请求过于频繁,请稍后再试")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名不能为空")
+		return
+	}
+	if len(req.Username) > 128 || len(req.Password) > 1024 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名或密码过长")
+		return
+	}
+	if utf8.RuneCountInString(req.Password) < serverstore.AuthMinPasswordLength(a.DB) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", fmt.Sprintf("密码至少 %d 位", serverstore.AuthMinPasswordLength(a.DB)))
+		return
+	}
+	hash, err := util.HashPassword(req.Password)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "注册失败")
+		return
+	}
+	id, err := serverstore.CreateUser(a.DB, &serverstore.User{
+		Username:     req.Username,
+		PasswordHash: hash,
+		Source:       "local",
+		Role:         serverstore.RoleUser,
+		// 2 = self-registration pending approval. It is intentionally not
+		// accepted by AuthenticateLocal until an administrator sets status=1.
+		Status: 2,
+	})
+	if errors.Is(err, serverstore.ErrDuplicate) {
+		writeError(c, http.StatusConflict, "DUPLICATE", "用户名已存在")
+		return
+	}
+	if errors.Is(err, serverstore.ErrValidation) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名不能为空")
+		return
+	}
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "注册失败")
+		return
+	}
+	u, err := serverstore.GetUserByID(a.DB, id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "注册失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, u.Username, "user_register", "self")
+	c.JSON(http.StatusAccepted, gin.H{"user": gin.H{"username": u.Username, "role": u.Role, "status": u.Status, "pending_approval": true}, "message": "注册申请已提交,等待管理员审核"})
 }
 
 // handleChangePassword 员工自助改密(0057; 仅本地认证用户):
@@ -692,9 +797,10 @@ func userJSON(u *serverstore.User) gin.H {
 		"email":        u.Email,
 		"is_admin":     u.IsAdmin,
 		// RBAC (v3b): role + permissions for the current user's role.
-		"role":        u.Role,
-		"permissions": PermissionsOf(u.Role),
-		"status":      u.Status,
+		"role":             u.Role,
+		"permissions":      PermissionsOf(u.Role),
+		"status":           u.Status,
+		"pending_approval": u.Status == 2,
 		// 0061/0062 员工余额(元,存量,分位口径):webadmin 用户列表/详情的数据源。
 		// 2026-09-11:quota_tokens/quota_money 已下线,不再下发。
 		"balance_money":     serverstore.QuantizeMoney(u.BalanceMoney),

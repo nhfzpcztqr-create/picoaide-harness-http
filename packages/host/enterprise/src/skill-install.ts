@@ -1160,6 +1160,17 @@ export async function listInstalledSkills(skillsDir: string): Promise<string[]> 
   return [...new Set(rows.map(row => row.name))].sort((a, b) => a.localeCompare(b))
 }
 
+/** Read the installer-owned version marker for one installed Skill. */
+export async function getInstalledSkillVersion(skillsDir: string, name: string): Promise<string | undefined> {
+  validateSkillName(name)
+  try {
+    const value = (await readFile(join(skillsDir, name, INSTALL_VERSION_FILE), 'utf8')).trim()
+    return value === '' ? undefined : value
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * 同名**影子**：`<skillsDir>` 下所有"运行时会当作 `name` 加载、但不是规范落点
  * `<skillsDir>/<name>` 那一份"的条目（旧备份、旧暂存、根上散落的 `<name>.md`、

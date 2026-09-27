@@ -42,6 +42,11 @@ type Handlers struct {
 	UpdateProvider   gin.HandlerFunc
 	DeleteProvider   gin.HandlerFunc
 	ProviderBalance  gin.HandlerFunc // GET /providers/:id/balance(2026-09 渠道余额)
+	ListProviderKeys    gin.HandlerFunc // GET /providers/:id/keys
+	CreateProviderKey   gin.HandlerFunc // POST /providers/:id/keys
+	UpdateProviderKey   gin.HandlerFunc // PUT /providers/:id/keys/:key_id
+	DeleteProviderKey   gin.HandlerFunc // DELETE /providers/:id/keys/:key_id
+	ResetProviderKey    gin.HandlerFunc // POST /providers/:id/keys/:key_id/reset
 	ListModelsAdmin  gin.HandlerFunc
 	CreateModel      gin.HandlerFunc
 	UpdateModel      gin.HandlerFunc
@@ -105,6 +110,11 @@ func NewHandlers(db *sql.DB) *Handlers {
 		UpdateProvider:      func(c *gin.Context) { updateProvider(c, db) },
 		DeleteProvider:      func(c *gin.Context) { deleteProvider(c, db) },
 		ProviderBalance:     func(c *gin.Context) { providerBalance(c, db) },
+		ListProviderKeys:    func(c *gin.Context) { listProviderKeys(c, db) },
+		CreateProviderKey:   func(c *gin.Context) { createProviderKey(c, db) },
+		UpdateProviderKey:   func(c *gin.Context) { updateProviderKey(c, db) },
+		DeleteProviderKey:   func(c *gin.Context) { deleteProviderKey(c, db) },
+		ResetProviderKey:    func(c *gin.Context) { resetProviderKey(c, db) },
 		ListModelsAdmin:     func(c *gin.Context) { listModelsAdmin(c, db) },
 		CreateModel:         func(c *gin.Context) { createModel(c, db) },
 		UpdateModel:         func(c *gin.Context) { updateModel(c, db) },

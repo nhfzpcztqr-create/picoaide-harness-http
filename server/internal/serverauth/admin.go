@@ -252,6 +252,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	AdminRoute(authed, "GET", "/server-info", PermServerInfoRead, a.handleServerInfo)
 	// 敏感操作审计日志(用户/部门/技能/令牌等)
 	AdminRoute(authed, "GET", "/audit", PermAuditRead, a.listAuditLogs)
+	AdminRoute(authed, "GET", "/audit/transcripts", PermAuditRead, a.listLLMTranscripts)
+	AdminRoute(authed, "GET", "/audit/transcripts/:id", PermAuditRead, a.getLLMTranscript)
 	// 审计保留策略(G13):读 auditor 可;写仅 super_admin(与 router 包镜像)。
 	AdminRoute(authed, "GET", "/audit/settings", PermAuditRead, a.getAuditSettings)
 	AdminRoute(authed, "PUT", "/audit/settings", PermAuditRetention, a.putAuditSettings)
@@ -996,6 +998,10 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "不能禁用自己")
 		return
 	}
+	if req.Status != nil && *req.Status != 0 && *req.Status != 1 && *req.Status != 2 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "status 只能是 0(禁用)、1(启用) 或 2(待审核)")
+		return
+	}
 	if req.DisplayName != nil {
 		u.DisplayName = *req.DisplayName
 	}
@@ -1244,33 +1250,51 @@ func (a *AdminAPI) listAuditLogs(c *gin.Context) {
 
 // GetAuditSettings 返回审计保留策略(auditor 只读; 写仅 super_admin, PermAuditRetention)。
 func (a *AdminAPI) getAuditSettings(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"retention_days": serverstore.AuditRetentionDays(a.DB)})
+	c.JSON(http.StatusOK, gin.H{
+		"retention_days":            serverstore.AuditRetentionDays(a.DB),
+		"transcript_retention_days": serverstore.LLMTranscriptRetentionDays(a.DB),
+	})
 }
 
 // PutAuditSettings 写审计保留策略(1~3650 天),立即按新策略清理旧日志并审计留痕。
 func (a *AdminAPI) putAuditSettings(c *gin.Context) {
 	var req struct {
-		RetentionDays *int `json:"retention_days"`
+		RetentionDays           *int `json:"retention_days"`
+		TranscriptRetentionDays *int `json:"transcript_retention_days"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.RetentionDays == nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "retention_days 必填")
+	if err := c.ShouldBindJSON(&req); err != nil || (req.RetentionDays == nil && req.TranscriptRetentionDays == nil) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "retention_days 或 transcript_retention_days 至少填写一项")
 		return
 	}
-	if *req.RetentionDays < 1 || *req.RetentionDays > 3650 {
+	if req.RetentionDays != nil && (*req.RetentionDays < 1 || *req.RetentionDays > 3650) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "retention_days 必须在 1~3650 天之间")
 		return
 	}
-	old := serverstore.AuditRetentionDays(a.DB)
-	if err := serverstore.SetSetting(a.DB, serverstore.AuditRetentionSetting, strconv.Itoa(*req.RetentionDays)); err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+	if req.TranscriptRetentionDays != nil && (*req.TranscriptRetentionDays < 1 || *req.TranscriptRetentionDays > 3650) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "transcript_retention_days 必须在 1~3650 天之间")
 		return
 	}
-	// 立即生效:另有周期调度器(auditretention,6h)兜底,此处主动触发一次。
-	if _, err := serverstore.PurgeOldAuditLogs(a.DB, time.Now().Add(-time.Duration(*req.RetentionDays)*24*time.Hour)); err != nil {
-		// 清理失败不影响保存(周期调度器兜底); 审计中不落错误。
+	oldAudit := serverstore.AuditRetentionDays(a.DB)
+	oldTranscript := serverstore.LLMTranscriptRetentionDays(a.DB)
+	if req.RetentionDays != nil {
+		if err := serverstore.SetSetting(a.DB, serverstore.AuditRetentionSetting, strconv.Itoa(*req.RetentionDays)); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+		_, _ = serverstore.PurgeOldAuditLogs(a.DB, time.Now().Add(-time.Duration(*req.RetentionDays)*24*time.Hour))
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "audit_retention_change", fmt.Sprintf("%d→%d", old, *req.RetentionDays))
-	c.JSON(http.StatusOK, gin.H{"retention_days": *req.RetentionDays})
+	if req.TranscriptRetentionDays != nil {
+		if err := serverstore.SetSetting(a.DB, serverstore.LLMTranscriptRetentionSetting, strconv.Itoa(*req.TranscriptRetentionDays)); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+		_, _ = serverstore.PurgeOldLLMTranscripts(a.DB, time.Now().Add(-time.Duration(*req.TranscriptRetentionDays)*24*time.Hour))
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "audit_retention_change", fmt.Sprintf("audit:%d→%d transcript:%d→%d", oldAudit, serverstore.AuditRetentionDays(a.DB), oldTranscript, serverstore.LLMTranscriptRetentionDays(a.DB)))
+	c.JSON(http.StatusOK, gin.H{
+		"retention_days":            serverstore.AuditRetentionDays(a.DB),
+		"transcript_retention_days": serverstore.LLMTranscriptRetentionDays(a.DB),
+	})
 }
 
 // getAuthConfig 返回认证配置(脱敏):auth.mode / auth.enabled / ldap.* / oidc.* / openid.*。
@@ -1645,6 +1669,7 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 	if !found {
 		methods = append([]string{"local"}, methods...)
 	}
+	localEnabled := localClientAuthEnabled(s)
 	out := make([]gin.H, 0, len(methods))
 	hideLocal := s["auth.hide_local"] == "true"
 	for _, m := range methods {
@@ -1664,7 +1689,10 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 			"hidden":  m == "local" && hideLocal,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"methods": out})
+	c.JSON(http.StatusOK, gin.H{
+		"methods":      out,
+		"registration": gin.H{"enabled": selfRegistrationEnabled() && localEnabled && !hideLocal},
+	})
 }
 
 // MaskSecret 是 webadmin 回传敏感字段时的占位符("***"):服务端遇此值保持现值。

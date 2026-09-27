@@ -57,6 +57,32 @@ func AuditRetentionDays(db *sql.DB) int {
 	return n
 }
 
+// LLMTranscriptRetentionSetting controls encrypted prompt/response retention.
+// It is deliberately separate from audit.retention_days because transcript
+// bodies are substantially larger and have a different access risk.
+const LLMTranscriptRetentionSetting = "llm.transcript_retention_days"
+
+// DefaultLLMTranscriptRetentionDays is the default encrypted transcript
+// retention window.
+const DefaultLLMTranscriptRetentionDays = 180
+
+// LLMTranscriptRetentionDays reads the transcript retention window and falls
+// back to the safe default for missing or invalid values.
+func LLMTranscriptRetentionDays(db *sql.DB) int {
+	if db == nil {
+		return DefaultLLMTranscriptRetentionDays
+	}
+	v, ok, err := GetSetting(db, LLMTranscriptRetentionSetting)
+	if err != nil || !ok || v == "" {
+		return DefaultLLMTranscriptRetentionDays
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return DefaultLLMTranscriptRetentionDays
+	}
+	return n
+}
+
 // settingsTTL settings 缓存时长:kv 表低频变更(webadmin 配置),而热路径
 // 每请求读多键(quota/rate_limit/peak_windows)。30s TTL,SetSetting 主动失效。
 const settingsTTL = 30 * time.Second

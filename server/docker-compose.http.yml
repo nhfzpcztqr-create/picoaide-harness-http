@@ -1,0 +1,9 @@
+# 纯 HTTP 部署的 Compose 覆盖文件。
+# 使用:
+#   docker compose -f docker-compose.yml -f docker-compose.http.yml up -d
+#
+# 覆盖基础 compose 中的 443 端口映射，确保纯 HTTP 部署不对外暴露 HTTPS 端口。
+services:
+  caddy:
+    ports: !reset
+      - "${CADDY_HTTP_PORT:-80}:80"

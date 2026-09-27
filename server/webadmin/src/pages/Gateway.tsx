@@ -17,6 +17,19 @@ import { isModelPriced } from '../lib/format'
 import { useFlash } from '../lib/use-flash'
 import { uid } from '../lib/utils'
 
+interface ProviderKey {
+  id: number
+  provider_id: number
+  label: string
+  api_key: string
+  enabled: boolean
+  priority: number
+  cooldown_until?: string
+  failure_count: number
+  last_used_at?: string
+  last_error_at?: string
+}
+
 interface Provider {
   id: number
   name: string
@@ -30,6 +43,7 @@ interface Provider {
 
 interface Channel {
   name: string
+  display_name?: string
   base_url: string
 }
 
@@ -182,6 +196,10 @@ export default function Gateway() {
   const [cfgLoaded, setCfgLoaded] = useState(false)
   // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
   const [busy, setBusy] = useState<string | null>(null)
+  const [keyDialogProvider, setKeyDialogProvider] = useState<Provider | null>(null)
+  const [providerKeys, setProviderKeys] = useState<ProviderKey[]>([])
+  const [keyForm, setKeyForm] = useState({ label: '', api_key: '', priority: '0', enabled: true })
+  const [keyErr, setKeyErr] = useState('')
 
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', protocol: '' })
@@ -195,6 +213,45 @@ export default function Gateway() {
   // 上游编辑(审计修复 M3):复用创建字段 + enabled 开关
   const [editProv, setEditProv] = useState<Provider | null>(null)
   const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true, protocol: '' })
+
+  async function openKeyDialog(provider: Provider) {
+    setKeyDialogProvider(provider)
+    setKeyErr('')
+    setKeyForm({ label: '', api_key: '', priority: '0', enabled: true })
+    try {
+      const r = await request(`${ADMIN_API}/providers/${provider.id}/keys`)
+      setProviderKeys(r.keys ?? [])
+    } catch (e) { setKeyErr(e instanceof Error ? e.message : '密钥列表加载失败') }
+  }
+
+  async function addProviderKey() {
+    if (!keyDialogProvider || !keyForm.api_key.trim()) { setKeyErr('请输入 API Key'); return }
+    setBusy(`add-key-${keyDialogProvider.id}`); setKeyErr('')
+    try {
+      await request(`${ADMIN_API}/providers/${keyDialogProvider.id}/keys`, { method: 'POST', body: JSON.stringify({ ...keyForm, priority: Number(keyForm.priority) || 0 }) })
+      setKeyForm({ label: '', api_key: '', priority: '0', enabled: true })
+      const r = await request(`${ADMIN_API}/providers/${keyDialogProvider.id}/keys`); setProviderKeys(r.keys ?? [])
+      setOkMsg('密钥已添加')
+    } catch (e) { setKeyErr(e instanceof Error ? e.message : '密钥添加失败') } finally { setBusy(null) }
+  }
+
+  async function removeProviderKey(key: ProviderKey) {
+    if (!keyDialogProvider || !window.confirm(`确认删除密钥「${key.label || key.id}」?`)) return
+    setBusy(`del-key-${key.id}`)
+    try {
+      await request(`${ADMIN_API}/providers/${keyDialogProvider.id}/keys/${key.id}`, { method: 'DELETE' })
+      setProviderKeys((prev) => prev.filter((item) => item.id !== key.id))
+    } catch (e) { setKeyErr(e instanceof Error ? e.message : '密钥删除失败') } finally { setBusy(null) }
+  }
+
+  async function resetProviderKey(key: ProviderKey) {
+    if (!keyDialogProvider) return
+    setBusy(`reset-key-${key.id}`)
+    try {
+      await request(`${ADMIN_API}/providers/${keyDialogProvider.id}/keys/${key.id}/reset`, { method: 'POST' })
+      setProviderKeys((prev) => prev.map((item) => item.id === key.id ? { ...item, cooldown_until: undefined, failure_count: 0, last_error_at: undefined } : item))
+    } catch (e) { setKeyErr(e instanceof Error ? e.message : '密钥重置失败') } finally { setBusy(null) }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -726,6 +783,7 @@ export default function Gateway() {
                 <TableHead>协议</TableHead>
                 <TableHead>Base URL</TableHead>
                 <TableHead>API Key</TableHead>
+                <TableHead>密钥池</TableHead>
                 <TableHead>模型</TableHead>
                 <TableHead>启用</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -733,9 +791,9 @@ export default function Gateway() {
             </TableHeader>
             <TableBody>
               {loading ? (
-                <TableRow data-testid="gateway-loading"><TableCell colSpan={8}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
+                <TableRow data-testid="gateway-loading"><TableCell colSpan={9}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
               ) : providers.length === 0 ? (
-                <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
+                <TableRow><TableCell colSpan={9} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
               ) : providers.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell>
@@ -762,6 +820,9 @@ export default function Gateway() {
                     ) : (
                       <span className="text-xs text-amber-600">未设置</span>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    <Button size="sm" variant="outline" onClick={() => openKeyDialog(p)}>管理密钥</Button>
                   </TableCell>
                   <TableCell>
                     {p.channel ? <span className="text-xs text-muted-foreground">自动同步</span> : p.models.join(', ')}
@@ -1078,7 +1139,7 @@ export default function Gateway() {
                 <SelectContent>
                   <SelectItem value={MANUAL_CHANNEL}>手动型(无渠道)</SelectItem>
                   {channels.map((c) => (
-                    <SelectItem key={c.name} value={c.name}>{c.name}</SelectItem>
+                    <SelectItem key={c.name} value={c.name}>{c.display_name || c.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -1157,7 +1218,7 @@ export default function Gateway() {
                 <SelectContent>
                   <SelectItem value={MANUAL_CHANNEL}>手动型(无渠道)</SelectItem>
                   {channels.map((c) => (
-                    <SelectItem key={c.name} value={c.name}>{c.name}</SelectItem>
+                    <SelectItem key={c.name} value={c.name}>{c.display_name || c.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -1452,6 +1513,19 @@ export default function Gateway() {
             </p>
             <Button className="w-full" disabled={busy !== null} onClick={saveModelPricing}>{busy === 'save-model-pricing' ? '处理中…' : '保存'}</Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!keyDialogProvider} onOpenChange={(v) => { if (!v) setKeyDialogProvider(null) }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>管理上游密钥{keyDialogProvider ? ` · ${keyDialogProvider.name}` : ''}</DialogTitle><DialogDescription>密钥只在服务端加密保存，列表永远不显示明文。429、401/403 和网络故障会自动冷却并切换。</DialogDescription></DialogHeader>
+          {keyErr && <div className="text-sm text-destructive">{keyErr}</div>}
+          <div className="space-y-2">
+            {providerKeys.length === 0 ? <p className="text-sm text-muted-foreground">暂无独立密钥，当前仍使用 Provider 的兼容密钥。</p> : providerKeys.map((key) => <div key={key.id} className="flex items-center justify-between rounded border p-2 text-sm"><div><div className="font-medium">{key.label || `密钥 ${key.id}`} · {key.api_key}</div><div className="text-xs text-muted-foreground">优先级 {key.priority} · 失败 {key.failure_count}{key.cooldown_until ? ` · 冷却至 ${new Date(key.cooldown_until).toLocaleString()}` : ''}</div></div><div className="flex gap-1"><Button size="sm" variant="outline" onClick={() => resetProviderKey(key)} disabled={busy !== null}>重置</Button><Button size="sm" variant="destructive" onClick={() => removeProviderKey(key)} disabled={busy !== null}>删除</Button></div></div>)}
+          </div>
+          <div className="grid grid-cols-2 gap-2"><div><Label>标签</Label><Input value={keyForm.label} onChange={(e) => setKeyForm({ ...keyForm, label: e.target.value })} /></div><div><Label>优先级</Label><Input type="number" value={keyForm.priority} onChange={(e) => setKeyForm({ ...keyForm, priority: e.target.value })} /></div></div>
+          <div><Label>新增 API Key</Label><SecretInput placeholder="sk-..." value={keyForm.api_key} onChange={(e) => setKeyForm({ ...keyForm, api_key: e.target.value })} /></div>
+          <Button onClick={addProviderKey} disabled={busy !== null}>{busy?.startsWith('add-key-') ? '添加中…' : '添加密钥'}</Button>
         </DialogContent>
       </Dialog>
 

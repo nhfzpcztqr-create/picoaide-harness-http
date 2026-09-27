@@ -345,7 +345,6 @@ async function start(): Promise<void> {
     requestQuit,
   )
   removeShutdownRequests = installShutdownRequests(process, app, requestQuit)
-
   app.on('second-instance', (_event, argv) => {
     runtime.show()
     // Windows/Linux: the second instance carries the deep link in argv.

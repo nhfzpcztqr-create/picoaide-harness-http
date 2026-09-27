@@ -9,7 +9,7 @@
 // 未声明 perms 的条目 fail-closed(仅超管可见),防止以后新增页面漏声明。
 import {
   HardDrive,
-  Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug, Boxes,
+  Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug, Boxes, ShieldCheck,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -23,6 +23,7 @@ import {
   PERM_SERVERINFO_READ,
   PERM_USAGE_READ,
   PERM_USER_READ,
+  PERM_MANAGED_READ,
   type MeUser,
 } from './rbac'
 
@@ -30,6 +31,7 @@ import {
 export {
   PERM_USER_READ, PERM_DEPT_READ, PERM_AUTH_READ, PERM_GATEWAY_READ, PERM_USAGE_READ,
   PERM_MARKET_READ, PERM_CAP_READ, PERM_CONNECTOR_READ, PERM_SERVERINFO_READ, PERM_AUDIT_READ,
+  PERM_MANAGED_READ,
 } from './rbac'
 
 export interface NavEntry {
@@ -44,6 +46,7 @@ export interface NavEntry {
 export const NAV_ENTRIES: NavEntry[] = [
   // 管理分区(super_admin 专属; auditor 仅有 user:read 只读)
   { to: '/users', label: '用户', icon: Users, section: '管理', perms: [PERM_USER_READ] },
+  { to: '/managed-config', label: '用户托管', icon: ShieldCheck, section: '管理', perms: [PERM_MANAGED_READ] },
   { to: '/departments', label: '部门', icon: Network, section: '管理', perms: [PERM_DEPT_READ] },
   { to: '/auth', label: '认证', icon: KeyRound, section: '管理', perms: [PERM_AUTH_READ] },
   // 运维分区(super_admin; auditor 仅有 usage:read)

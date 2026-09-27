@@ -592,7 +592,7 @@ function parsePartialState(text: string): PartialTransferState {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid partial state')
   const record = value as Record<string, unknown>
   if (record.version !== PARTIAL_STATE_VERSION) throw new Error('invalid partial state version')
-  if (typeof record.downloadURL !== 'string' || !record.downloadURL.startsWith('https://')) {
+  if (typeof record.downloadURL !== 'string' || !isHTTPURL(record.downloadURL)) {
     throw new Error('invalid partial state url')
   }
   if (typeof record.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(record.sha256)) {
@@ -618,6 +618,15 @@ function parsePartialState(text: string): PartialTransferState {
     ...(totalBytes === undefined ? {} : { totalBytes }),
     ...(etag === undefined ? {} : { etag }),
     ...(lastModified === undefined ? {} : { lastModified }),
+  }
+}
+
+function isHTTPURL(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
   }
 }
 
@@ -1224,7 +1233,7 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
  * 不能用固定模板:渠道化打包下每个渠道的安装包名跟随该渠道的产品名,
  * 写死模板既会把厂商品牌留在用户看到的文件名上,也会与实际产物名不符。
  * 清单里的 URL 是权威来源 —— 服务端下发的就是它自己镜像里那个文件。
- * @param downloadURL - 清单里的绝对下载地址(解析器已保证是绝对 https)。
+ * @param downloadURL - 清单里的绝对 HTTP(S) 下载地址(解析器已保证协议合法)。
  * @param version - 规范版本号(回退命名用)。
  * @param platform - 目标平台(回退命名用)。
  * @returns 安全的单段文件名。

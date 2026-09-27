@@ -70,11 +70,12 @@ var errStreamLineTooLong = errors.New("upstream stream line too long")
 
 // API holds gateway dependencies.
 type API struct {
-	DB     *sql.DB
-	client *http.Client // non-stream requests (bounded timeout)
-	sse    *http.Client // streaming requests (lifecycle = request context)
-	rl     *rateLimiter
-	conc   *concurrencyMeter // 按模型 in-flight 计数(2026-08-31)
+	DB      *sql.DB
+	client  *http.Client // non-stream requests (bounded timeout)
+	sse     *http.Client // streaming requests (lifecycle = request context)
+	rl      *rateLimiter
+	conc    *concurrencyMeter // 按模型 in-flight 计数(2026-08-31)
+	keyPool *providerKeyPool
 }
 
 // handleChatCompletions proxies /v1/chat/completions to the matching upstream.
@@ -185,12 +186,18 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 				return
 			}
 		}
-		resp, err = a.forward(c, &ups[i], body, req.Stream)
+		attempt, lease, keyErr := a.upstreamWithKey(ups[i])
+		if keyErr != nil {
+			err = keyErr
+		} else {
+			resp, err = a.forward(c, &attempt, body, req.Stream)
+			recordLeaseResponse(lease, resp, err)
+		}
 		if a.rejectForwardError(c, usageID, err) {
 			return
 		}
 		if err == nil {
-			respSecrets = []string{ups[i].APIKey}
+			respSecrets = []string{attempt.APIKey}
 			chosenProviderID = ups[i].ID
 			// P1-6:pending 行在调用上游前插入(失败即拒绝),provider 此刻才
 			// 确定 —— 补一次绑定,让回填结算按实际 provider 取价。
@@ -834,6 +841,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
+	// SSE must reach the desktop client incrementally through Caddy/nginx or
+	// another reverse proxy. These headers are harmless for direct responses
+	// and prevent common proxy/cache buffering regressions in intranet setups.
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.WriteHeader(resp.StatusCode)
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
@@ -841,6 +853,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	idleTimedOut := false
 	lineTooLong := false
 	lineEOF := false
+	doneSeen := false
 	var forwardedBytes int64
 	// deliveredContentBytes/Chunks 是**正文内容**口径(r7 r7f1-2,P2):只有解析到
 	// 正文/工具调用增量才累加,data: [DONE]/event:/注释/纯 usage 行/上游 error
@@ -908,6 +921,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 			lastLineAt = time.Now()
 			if len(r.line) > 0 {
 				line := string(redactSecrets([]byte(r.line), secrets))
+				if bytes.Equal(bytes.TrimSpace([]byte(line)), []byte("data: [DONE]")) {
+					doneSeen = true
+				}
 				// usage 行有两个来源:SSE 的 `data:` 行,以及**忽略 stream 的上游**
 				// 直接回的整包 JSON(rc3-3 的 D 形态)。后者同样可能带着上游如实
 				// 上报的 usage —— 不解析它就只能按字节估算,把"真值"换成"估算"
@@ -1016,6 +1032,14 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	if n, isContent := contentTracker.flush(); isContent {
 		deliveredContentChunks++
 		deliveredContentBytes += n
+	}
+	if lineEOF && !doneSeen && !clientGone && !idleTimedOut && !lineTooLong {
+		log.Printf("gateway: upstream stream ended before [DONE]")
+		fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游流式响应提前结束"}}`)
+		if fl != nil {
+			touchSSEWriteDeadline(c)
+			fl.Flush()
+		}
 	}
 	// 结算:
 	//   - 上游回报的用量已在收到 usage 行时幂等回填(计费已完成);

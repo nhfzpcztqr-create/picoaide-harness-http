@@ -14,10 +14,11 @@ import (
 
 // ClientHandlers 客户端员工面(auth)handler 集合。
 type ClientHandlers struct {
-	Login  gin.HandlerFunc
-	Logout gin.HandlerFunc
-	Me     gin.HandlerFunc
-	Usage  gin.HandlerFunc
+	Login    gin.HandlerFunc
+	Register gin.HandlerFunc
+	Logout   gin.HandlerFunc
+	Me       gin.HandlerFunc
+	Usage    gin.HandlerFunc
 	// ChangePassword 员工自助改密(0057; 本地认证用户)。
 	ChangePassword gin.HandlerFunc
 	// OIDC 每套已配置 browser provider(oidc/openid)一条 login/callback。
@@ -56,6 +57,7 @@ func (a *API) Handlers() *ClientHandlers {
 	}
 	return &ClientHandlers{
 		Login:           a.handleLogin,
+		Register:        a.handleRegister,
 		Logout:          a.handleLogout,
 		Me:              a.handleMe,
 		Usage:           a.handleUsageSummary,
@@ -128,6 +130,8 @@ type AdminHandlers struct {
 	UsageRequests     gin.HandlerFunc // GET /usage/requests(2026-09 请求级明细)
 	ServerInfo        gin.HandlerFunc
 	ListAuditLogs     gin.HandlerFunc
+	ListTranscripts   gin.HandlerFunc // GET /audit/transcripts
+	GetTranscript     gin.HandlerFunc // GET /audit/transcripts/:id
 	GetAuditSettings  gin.HandlerFunc // GET /audit/settings 审计保留策略(G13)
 	PutAuditSettings  gin.HandlerFunc // PUT /audit/settings 审计保留策略(仅 super_admin)
 	GetAuthConfig     gin.HandlerFunc
@@ -171,6 +175,8 @@ func (a *AdminAPI) Handlers() *AdminHandlers {
 		UsageRequests:     a.usageRequests,
 		ServerInfo:        a.handleServerInfo,
 		ListAuditLogs:     a.listAuditLogs,
+		ListTranscripts:   a.listLLMTranscripts,
+		GetTranscript:     a.getLLMTranscript,
 		GetAuditSettings:  a.getAuditSettings,
 		PutAuditSettings:  a.putAuditSettings,
 		GetAuthConfig:     a.getAuthConfig,

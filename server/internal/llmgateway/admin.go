@@ -776,6 +776,175 @@ func deleteProvider(c *gin.Context, db *sql.DB) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func providerKeyJSON(key serverstore.GatewayProviderAPIKey) gin.H {
+	return gin.H{
+		"id": key.ID, "provider_id": key.ProviderID, "label": key.Label,
+		"api_key": serverauth.MaskSecret, "enabled": key.Enabled, "priority": key.Priority,
+		"cooldown_until": key.CooldownUntil, "failure_count": key.FailureCount,
+		"last_used_at": key.LastUsedAt, "last_error_at": key.LastErrorAt,
+	}
+}
+
+func listProviderKeys(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "provider id 无效")
+		return
+	}
+	keys, err := serverstore.ListGatewayProviderAPIKeys(db, id)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	out := make([]gin.H, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, providerKeyJSON(key))
+	}
+	c.JSON(http.StatusOK, gin.H{"keys": out})
+}
+
+type providerKeyReq struct {
+	Label    string `json:"label"`
+	APIKey   string `json:"api_key"`
+	Enabled  *bool  `json:"enabled"`
+	Priority *int   `json:"priority"`
+}
+
+func createProviderKey(c *gin.Context, db *sql.DB) {
+	providerID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "provider id 无效")
+		return
+	}
+	if _, err := serverstore.GetGatewayProvider(db, providerID); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "上游不存在")
+		return
+	} else if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	var req providerKeyReq
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.APIKey) == "" || req.APIKey == serverauth.MaskSecret {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "api_key 必填且不能是掩码值")
+		return
+	}
+	enc, err := encryptSecret(req.APIKey)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	priority := 0
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+	key := &serverstore.GatewayProviderAPIKey{ProviderID: providerID, APIKeyEnc: enc, Label: req.Label, Enabled: enabled, Priority: priority}
+	if _, err := serverstore.AddGatewayProviderAPIKey(db, key); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	c.JSON(http.StatusCreated, providerKeyJSON(*key))
+}
+
+func updateProviderKey(c *gin.Context, db *sql.DB) {
+	providerID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "provider id 无效")
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "key id 无效")
+		return
+	}
+	key, err := serverstore.GetGatewayProviderAPIKey(db, providerID, keyID)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "密钥不存在")
+		return
+	} else if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	var req providerKeyReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	if req.Label != "" {
+		key.Label = req.Label
+	}
+	if req.Enabled != nil {
+		key.Enabled = *req.Enabled
+	}
+	if req.Priority != nil {
+		key.Priority = *req.Priority
+	}
+	if req.APIKey != "" {
+		if req.APIKey == serverauth.MaskSecret {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "api_key 不能是掩码值")
+			return
+		}
+		key.APIKeyEnc, err = encryptSecret(req.APIKey)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
+			return
+		}
+	}
+	if err := serverstore.UpdateGatewayProviderAPIKey(db, key); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "密钥不存在")
+		return
+	} else if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	c.JSON(http.StatusOK, providerKeyJSON(*key))
+}
+
+func deleteProviderKey(c *gin.Context, db *sql.DB) {
+	providerID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "provider id 无效")
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "key id 无效")
+		return
+	}
+	if err := serverstore.DeleteGatewayProviderAPIKey(db, providerID, keyID); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "密钥不存在")
+		return
+	} else if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func resetProviderKey(c *gin.Context, db *sql.DB) {
+	providerID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "provider id 无效")
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "key id 无效")
+		return
+	}
+	if err := serverstore.ResetGatewayProviderAPIKey(db, providerID, keyID); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "密钥不存在")
+		return
+	} else if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "重置失败")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 type modelReq struct {
 	Name          string `json:"name"`
 	ProviderID    int64  `json:"provider_id"`

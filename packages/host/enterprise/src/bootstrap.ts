@@ -5,6 +5,7 @@ import { getBootstrap } from './server-connector/bootstrap.ts'
 import { AuthError } from './server-connector/auth.ts'
 import { TOKEN_ENV } from './gateway-model.ts'
 import type { Session } from './server-connector/config.ts'
+import { applyManagedSettings, getManagedPolicy, reportManagedState, syncManagedSkills } from './managed-policy.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'bootstrap'
@@ -271,7 +272,16 @@ export function apply(ctx: Context): void {
       // 服务端下发的思考强度(2026-08):llm-deepseek 适配器的
       // connection.defaults.reasoningEffort 来自 settings(off|low|high|max),
       // 这是实际生效点;同时写 agent-default-model 保持 UI 展示一致。
-      const reasoningEffort = cfg.web?.default_thinking_level
+      const managed = await getManagedPolicy(session)
+      const managedModel = managed.settings.default_model
+      const managedReasoning = managed.settings.reasoning_effort
+      const reasoningEffort = managedReasoning === 'off' || managedReasoning === 'low' || managedReasoning === 'high' || managedReasoning === 'max'
+        ? managedReasoning
+        : cfg.web?.default_thinking_level
+      const defaultModel = typeof managedModel === 'string' && cfg.models.some((item) => item.id === managedModel)
+        ? managedModel
+        : cfg.default_model
+      await syncManagedSkills(session, managed)
 
       // 先更新 thinking adapter 映射(装饰 resolveModelInfo 用)。
       // 必须在 settings.update 之前:settings.update 会触发
@@ -307,7 +317,7 @@ export function apply(ctx: Context): void {
       })
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {
         provider: DEEPSEEK_PROVIDER,
-        model: cfg.default_model,
+        model: defaultModel,
         ...reasoningEffort ? { reasoningEffort } : {},
       })
       // web_search 服务端代理(0043):搜索也走网关 /v1/messages,官方 key
@@ -318,8 +328,10 @@ export function apply(ctx: Context): void {
       await ctx.settings.update(WEB_SEARCH_DEEPSEEK_NS, {
         apiKeyEnv: TOKEN_ENV,
         baseURL: `${session.serverURL.replace(/\/+$/, '')}/v1`,
-        model: cfg.default_model,
+        model: defaultModel,
       })
+      await applyManagedSettings(ctx, managed, cfg.models)
+      await reportManagedState(session, managed)
     } catch (cause) {
       // M2: a revoked/expired/disabled session must not linger. Clear it so
       // the auth-gate tripwire reloads the window into the login page.
@@ -329,6 +341,10 @@ export function apply(ctx: Context): void {
       }
       ctx.logger.error('pico bootstrap sync failed')
       ctx.logger.error(cause)
+      try {
+        const managed = await getManagedPolicy(session)
+        await reportManagedState(session, managed, 'error', cause instanceof Error ? cause.message : String(cause))
+      } catch { /* preserve the original bootstrap failure */ }
     }
   }
 
@@ -336,5 +352,16 @@ export function apply(ctx: Context): void {
   // 完成时机与插件装载顺序无关 —— 恢复型启动下首个会话事件可能早于本插件 apply，
   // 裸订阅会整个漏掉它（2026-09-05 现场：旧会话下视觉模型缺 inputModalities、
   // 上传图片被拒，重新登录即恢复，根因就是这次同步没跑）。
-  subscribeSession(ctx, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
+  let managedTimer: ReturnType<typeof setInterval> | undefined
+  subscribeSession(ctx, (session) => {
+    if (managedTimer !== undefined) clearInterval(managedTimer)
+    managedTimer = undefined
+    void sync(session).catch((cause) => ctx.logger.error(cause))
+    if (session !== null) {
+      managedTimer = setInterval(() => {
+        void sync(session)
+          .catch((cause) => ctx.logger.error(cause))
+      }, 5 * 60 * 1000)
+    }
+  })
 }

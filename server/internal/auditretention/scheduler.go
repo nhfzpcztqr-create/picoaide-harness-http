@@ -105,8 +105,18 @@ func (s *Scheduler) TryRun() int64 {
 		log.Printf("audit retention: purged %d audit entr(ies) older than %s (retention_days=%d)",
 			removed, cutoff.UTC().Format(time.RFC3339), days)
 	}
+	transcriptDays := serverstore.LLMTranscriptRetentionDays(s.db)
+	transcriptCutoff := s.nowFn().Add(-time.Duration(transcriptDays) * 24 * time.Hour)
+	transcriptsRemoved, transcriptErr := serverstore.PurgeOldLLMTranscripts(s.db, transcriptCutoff)
+	if transcriptErr != nil {
+		log.Printf("llm transcript retention: purge failed (retention_days=%d cutoff=%s): %v",
+			transcriptDays, transcriptCutoff.UTC().Format(time.RFC3339), transcriptErr)
+	} else if transcriptsRemoved > 0 {
+		log.Printf("llm transcript retention: purged %d transcript(s) older than %s (retention_days=%d)",
+			transcriptsRemoved, transcriptCutoff.UTC().Format(time.RFC3339), transcriptDays)
+	}
 	if s.onRun != nil {
 		s.onRun()
 	}
-	return removed
+	return removed + transcriptsRemoved
 }

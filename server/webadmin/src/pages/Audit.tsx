@@ -9,6 +9,7 @@ import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { Card } from '../components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { downloadCsv } from '../lib/csv'
 import { hasPermission } from '../lib/rbac'
 import { ScrollText, RefreshCw, Download } from 'lucide-react'
@@ -29,6 +30,26 @@ interface LogRow {
   action: string
   detail: string
   created_at: string
+}
+
+interface TranscriptRow {
+  id: number
+  request_id: string
+  user_id: number
+  endpoint: string
+  model: string
+  status_code: number
+  response_bytes: number
+  response_sha256: string
+  audit_status: string
+  created_at: string
+  completed_at?: string
+}
+
+interface TranscriptDetail {
+  transcript: TranscriptRow & { request_body?: string }
+  request: string
+  response: string
 }
 
 // M3: 与服务端实际写入的 audit action 全集对齐(用户/部门/技能/令牌等敏感操作)
@@ -69,6 +90,7 @@ export const ACTION_LABEL: Record<string, string> = {
   user_update: '更新用户',
   user_delete: '删除用户',
   user_dept: '用户部门变更',
+  user_register: '用户自助注册',
   user_tokens_revoked: '吊销令牌',
   auth_config: '修改认证配置',
   // LDAP 目录同步（第五轮审计 R5-B-8，2026-09-23）：同步**只自动停用、永不自动
@@ -120,6 +142,7 @@ export const ACTION_LABEL: Record<string, string> = {
   skill_normalize: '规范化技能包',
   // 网关(上游/模型/配置)。
   gateway_config: '网关配置变更',
+  managed_config_update: '托管配置变更',
   // 2026-09-22:网关文件台账的清理动作(管理员按条件删除上游文件 + 台账行)。
   gateway_file_delete: '网关文件删除',
   gateway_file_purge: '网关文件批量清理',
@@ -240,6 +263,7 @@ export default function Audit() {
   const loadSeq = useRef(0)
   // G13: 审计保留策略(仅 super_admin 可写; auditor 只读展示)
   const [retentionDays, setRetentionDays] = useState(180)
+  const [transcriptRetentionDays, setTranscriptRetentionDays] = useState(180)
   // 2026-09-17 审计 F6：保留天数默认 180，异步填充的 catch 又是静默的 ⇒ 未加载完
   // （或加载失败）就点「保存策略」会把 180 写进库。加载成功前锁死写面。
   const [retentionLoaded, setRetentionLoaded] = useState(false)
@@ -249,6 +273,15 @@ export default function Audit() {
   // R6（2026-09-17 独立验证）：日志列表此前没有任何加载闸门，首帧就渲染
   // 「暂无审计记录」——把"还没读到"说成"没有记录"（F7 在 Users/Departments 修掉的同族形态）。
   const [logsLoaded, setLogsLoaded] = useState(false)
+  const [transcripts, setTranscripts] = useState<TranscriptRow[]>([])
+  const [transcriptsTotal, setTranscriptsTotal] = useState(0)
+  const [transcriptModel, setTranscriptModel] = useState('')
+  const [transcriptEndpoint, setTranscriptEndpoint] = useState('')
+  const [transcriptDetail, setTranscriptDetail] = useState<TranscriptDetail | null>(null)
+  const [transcriptBusy, setTranscriptBusy] = useState(false)
+  const [transcriptDetailBusy, setTranscriptDetailBusy] = useState(false)
+  const [transcriptDetailError, setTranscriptDetailError] = useState('')
+  const [transcriptDialogOpen, setTranscriptDialogOpen] = useState(false)
 
   // 体验层能力判定(护栏在服务端 RequirePermission):
   //   GET /audit/settings 只需 audit:read —— auditor 能读保留天数;
@@ -273,6 +306,7 @@ export default function Audit() {
       // G13: 保留策略(读仅 PermAuditRead; 写 403 由保存按钮语义兜底)
       request(`${ADMIN_API}/audit/settings`).then((s) => {
         if (s?.retention_days) setRetentionDays(s.retention_days)
+        if (s?.transcript_retention_days) setTranscriptRetentionDays(s.transcript_retention_days)
         setRetentionLoaded(true)
       }).catch((err: any) => {
         // 5-3（2026-09-17 第二轮独立验证）：此前这里静默吞掉失败，而本轮又给未加载状态
@@ -287,6 +321,24 @@ export default function Audit() {
   }, [])
 
   useEffect(() => { load(1, appliedAction, appliedUser) }, [load, appliedAction, appliedUser])
+
+  const loadTranscripts = useCallback(async () => {
+    setTranscriptBusy(true)
+    try {
+      const params = new URLSearchParams({ offset: '0', limit: '50' })
+      if (transcriptModel.trim()) params.set('model', transcriptModel.trim())
+      if (transcriptEndpoint.trim()) params.set('endpoint', transcriptEndpoint.trim())
+      const data = await request(`${ADMIN_API}/audit/transcripts?${params.toString()}`)
+      setTranscripts(Array.isArray(data?.transcripts) ? data.transcripts : [])
+      setTranscriptsTotal(Number(data?.total ?? 0))
+    } catch (err: any) {
+      setError(`读取 Prompt/Response 审计失败: ${err.message}`)
+    } finally {
+      setTranscriptBusy(false)
+    }
+  }, [transcriptEndpoint, transcriptModel])
+
+  useEffect(() => { void loadTranscripts() }, [loadTranscripts])
 
   const applyFilter = () => {
     setAppliedAction(filterAction)
@@ -335,12 +387,16 @@ export default function Audit() {
       setError('保留天数必须是 1~3650 的整数')
       return
     }
+    if (!Number.isInteger(transcriptRetentionDays) || transcriptRetentionDays < 1 || transcriptRetentionDays > 3650) {
+      setError('Prompt/Response 保留天数必须是 1~3650 的整数')
+      return
+    }
     setRetentionBusy(true)
     setError('')
     try {
       await request(`${ADMIN_API}/audit/settings`, {
         method: 'PUT',
-        body: JSON.stringify({ retention_days: retentionDays }),
+        body: JSON.stringify({ retention_days: retentionDays, transcript_retention_days: transcriptRetentionDays }),
       })
       setError('')
     } catch (err: any) {
@@ -348,6 +404,31 @@ export default function Audit() {
     } finally {
       setRetentionBusy(false)
     }
+  }
+
+  const openTranscript = async (id: number) => {
+    setTranscriptDetail(null)
+    setTranscriptDetailError('')
+    setTranscriptDialogOpen(true)
+    setTranscriptDetailBusy(true)
+    try {
+      setTranscriptDetail(await request<TranscriptDetail>(`${ADMIN_API}/audit/transcripts/${id}`))
+    } catch (err: any) {
+      setTranscriptDetailError(err?.message ?? '未知错误')
+    } finally {
+      setTranscriptDetailBusy(false)
+    }
+  }
+
+  const exportTranscript = () => {
+    if (!transcriptDetail) return
+    const payload = JSON.stringify(transcriptDetail, null, 2)
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json;charset=utf-8' }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `llm-transcript-${transcriptDetail.transcript.request_id}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   return (
@@ -382,6 +463,19 @@ export default function Audit() {
           onChange={(e) => setRetentionDays(Number(e.target.value))}
         />
         <span className="text-xs text-muted-foreground">天(1~3650; 保存后立即清理更旧日志)</span>
+        <span className="ml-3 text-[13px] font-medium">Prompt/Response 保留</span>
+        <Input
+          type="number"
+          min={1}
+          max={3650}
+          className="h-8 w-28"
+          aria-label="Prompt/Response 保留天数"
+          value={transcriptRetentionDays}
+          readOnly={!canWriteRetention}
+          disabled={!canWriteRetention || !retentionLoaded}
+          onChange={(e) => setTranscriptRetentionDays(Number(e.target.value))}
+        />
+        <span className="text-xs text-muted-foreground">天(加密保存全文)</span>
         {canWriteRetention && !retentionLoaded && !retentionError && (
           // R5：加载未完成时按钮是禁用的，必须说明"为什么点了没反应"；同时输入框也
           // 禁用 —— 否则管理员先输入的天数会被落地值覆盖（实测输入 30 → 变成 90）。
@@ -403,6 +497,67 @@ export default function Audit() {
           </span>
         )}
       </div>
+      <Card className="p-4" data-testid="llm-transcript-audit">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold">LLM Prompt / Response 审计</h2>
+            <p className="text-xs text-muted-foreground">共 {transcriptsTotal} 条；正文只在管理员打开详情时解密。</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void loadTranscripts()} disabled={transcriptBusy}>
+            <RefreshCw className="h-3.5 w-3.5" /> {transcriptBusy ? '加载中…' : '刷新'}
+          </Button>
+        </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Input className="w-48" placeholder="模型" value={transcriptModel} onChange={(e) => setTranscriptModel(e.target.value)} />
+          <Input className="w-56" placeholder="Endpoint" value={transcriptEndpoint} onChange={(e) => setTranscriptEndpoint(e.target.value)} />
+        </div>
+        <Table>
+          <TableHeader><TableRow><TableHead>时间</TableHead><TableHead>模型</TableHead><TableHead>Endpoint</TableHead><TableHead>状态</TableHead><TableHead>响应字节</TableHead><TableHead>审计状态</TableHead><TableHead /></TableRow></TableHeader>
+          <TableBody>
+            {transcripts.map((row) => (
+              <TableRow key={row.id}>
+                <TableCell className="font-mono text-xs">{fmtTime(row.created_at)}</TableCell>
+                <TableCell>{row.model || '—'}</TableCell>
+                <TableCell className="font-mono text-xs">{row.endpoint}</TableCell>
+                <TableCell>{row.status_code || '—'}</TableCell>
+                <TableCell>{row.response_bytes}</TableCell>
+                <TableCell><Badge variant={row.audit_status === 'complete' ? 'success' : 'destructive'}>{row.audit_status}</Badge></TableCell>
+                <TableCell><Button size="sm" variant="ghost" onClick={() => void openTranscript(row.id)}>查看全文</Button></TableCell>
+              </TableRow>
+            ))}
+            {!transcriptBusy && transcripts.length === 0 && <TableRow><TableCell colSpan={7} className="text-sm text-muted-foreground">暂无 Prompt/Response 审计记录</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </Card>
+      <Dialog open={transcriptDialogOpen} onOpenChange={(open) => {
+        setTranscriptDialogOpen(open)
+        if (!open) {
+          setTranscriptDetail(null)
+          setTranscriptDetailError('')
+        }
+      }}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>LLM Prompt / Response 全文</DialogTitle>
+            <DialogDescription>
+              {transcriptDetail
+                ? `请求 ID: ${transcriptDetail.transcript.request_id} · SHA256: ${transcriptDetail.transcript.response_sha256 || '—'}`
+                : '正文仅在管理员打开详情时解密。'}
+            </DialogDescription>
+          </DialogHeader>
+          {transcriptDetailBusy && <p role="status" className="text-sm text-muted-foreground">正在解密并读取审计正文…</p>}
+          {transcriptDetailError && <p role="alert" className="text-sm text-destructive">读取审计详情失败：{transcriptDetailError}</p>}
+          {transcriptDetail && (
+            <div className="space-y-3">
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={exportTranscript}><Download className="h-3.5 w-3.5" />导出 JSON</Button>
+              </div>
+              <div><div className="mb-1 text-xs font-semibold">Prompt</div><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-3 text-xs">{transcriptDetail.request}</pre></div>
+              <div><div className="mb-1 text-xs font-semibold">Response</div><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-3 text-xs">{transcriptDetail.response}</pre></div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
       {/* M8: 筛选条 */}
       <div className="flex flex-wrap items-center gap-2">
         <Select value={filterAction} onValueChange={setFilterAction}>
@@ -428,7 +583,7 @@ export default function Audit() {
           <Button size="sm" variant="ghost" onClick={() => { setFilterAction(''); setFilterUser(''); setAppliedAction(''); setAppliedUser('') }}>清除筛选</Button>
         )}
       </div>
-      <Card>
+      <Card data-testid="audit-log-card">
       <Table>
         <TableHeader>
           <TableRow>
@@ -441,7 +596,7 @@ export default function Audit() {
         </TableHeader>
         <TableBody>
           {logs.map((l) => (
-            <TableRow key={l.id}>
+            <TableRow key={l.id} data-testid="audit-log-row">
               <TableCell className="font-mono text-xs text-slate-400">{l.id}</TableCell>
               <TableCell><Badge variant={actionBadgeVariant(l.action)}>{ACTION_LABEL[l.action] ?? l.action}</Badge></TableCell>
               <TableCell>

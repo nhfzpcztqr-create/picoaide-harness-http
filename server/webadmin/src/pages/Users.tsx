@@ -25,7 +25,7 @@ interface User {
   status: number
   groups?: string[]
   monthly_usage?: number // tokens used this calendar month
-  monthly_cost?: number //  yuan spent this calendar month
+  monthly_cost?: number // retained server field; the UI shows monthly_usage instead
   // 0057 密码/MFA
   source?: string // 'local' | 'external'; external 密码由 IdP 管理
   password_changeable?: boolean
@@ -183,7 +183,8 @@ export default function Users() {
 
   async function toggleUser(u: User) {
     if (busy) return // 双击守卫(审计2026-W9)
-    // 高2:禁用是危险操作(服务端会同时吊销该用户全部 API 令牌),必须确认
+    // 高2:禁用是危险操作(服务端会同时吊销该用户全部 API 令牌),必须确认。
+    // status=2 是自助注册待审核,通过审核不需要二次确认。
     if (u.status === 1 && !window.confirm(`确定禁用用户 ${u.username}?禁用将立即吊销其全部 API 令牌,客户端需重新登录。`)) return
     setBusy(true)
     try {
@@ -407,7 +408,7 @@ export default function Users() {
     <div className="space-y-5">
       <PageHeader
         title="用户管理"
-        desc="企业成员账号、余额、部门归属、流量配额与登录令牌"
+        desc="企业成员账号、Token 用量、余额、部门归属与登录令牌"
         actions={
           <>
             <div className="relative">
@@ -447,7 +448,7 @@ export default function Users() {
               <TableHead>部门</TableHead>
               <TableHead>角色</TableHead>
               <TableHead>状态</TableHead>
-              <TableHead className="min-w-0">本月消费</TableHead>
+              <TableHead className="min-w-0">本月 tokens</TableHead>
               <TableHead className="min-w-0">余额</TableHead>
               <TableHead className="min-w-0">上次改密</TableHead>
               <TableHead className="w-1 text-right">操作</TableHead>
@@ -471,14 +472,14 @@ export default function Users() {
                     : <span className="text-xs text-muted-foreground">—</span>}
                 </TableCell>
                 <TableCell>{roleBadge(u)}</TableCell>
-                <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
+                <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : u.status === 2 ? <Badge variant="outline">待审核</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
                 <TableCell className="font-mono text-xs">
                   {u.is_admin ? (
                     <span className="text-muted-foreground">豁免</span>
                   ) : (
                     <div className="space-y-0.5">
-                      <div className="font-semibold text-slate-800">{fmtMoney(u.monthly_cost ?? 0)}</div>
-                      <div className="text-[11px] text-muted-foreground">{fmtTokens(u.monthly_usage ?? 0)} tokens</div>
+                      <div className="font-semibold text-slate-800">{fmtTokens(u.monthly_usage ?? 0)}</div>
+                      <div className="text-[11px] text-muted-foreground">本自然月用量</div>
                     </div>
                   )}
                 </TableCell>
@@ -518,7 +519,7 @@ export default function Users() {
                   {canWrite && (
                     <>
                       <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
-                        {u.status === 1 ? '禁用' : '启用'}
+                        {u.status === 1 ? '禁用' : u.status === 2 ? '通过审核' : '启用'}
                       </Button>
                       <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
                     </>

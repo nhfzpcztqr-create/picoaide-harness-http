@@ -175,6 +175,7 @@ const PERM_WITHOUT_NAV_ENTRY: Record<string, string> = {
   'audit:retention:write': '写面：审计页（audit:read 进入）内的保留策略卡片',
   'portal:read': '门户页无独立管理入口（相关配置在「服务器信息」页）',
   'portal:write': '写面：门户配置动作',
+  'managed:write': '写面：用户托管页（managed:read 进入）内的动作',
 }
 
 const superAdmin: MeUser = { role: 'super_admin', permissions: GO_ALL_PERMISSIONS }

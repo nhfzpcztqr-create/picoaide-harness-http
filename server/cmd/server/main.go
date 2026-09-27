@@ -27,6 +27,7 @@ import (
 	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/connectors"
 	"github.com/picoaide/picoaide/internal/llmgateway"
+	"github.com/picoaide/picoaide/internal/managedconfig"
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
 	"github.com/picoaide/picoaide/internal/reports"
@@ -532,14 +533,14 @@ func channelLogoDarkURL() string {
 	return "/api/client/v2/channel/logo-dark"
 }
 
-// portalDownloads 组装三平台下载项与下载区说明。
+// portalDownloads 组装 Windows 客户端下载项与下载区说明。
 //
 // 默认地址指向**本服务端的**安装包(随镜像发布,见 internal/clientrelease);
 // 管理员配置了 portal.client_download_* 时以配置为准(可指向自有 CDN)。
 // 两者都没有时该平台显示为不可用(而不是给一个坏链接)。
 //
 // 内置地址与更新清单**同一口径**(clientrelease.RequestOrigin):客户端只从
-// https 来源装包,来源不安全时门户也不显示内置入口,并把原因写进下载区
+// HTTP/HTTPS 来源装包,没有可推导来源时门户也不显示内置入口,并把原因写进下载区
 // (运维据此配置 PICOAI_PUBLIC_BASE_URL),而不是让下载区静默空着。
 // @returns 下载项与补充说明(无补充说明时为空串)。
 func portalDownloads(c *gin.Context, settings map[string]string) ([]portal.Platform, string) {
@@ -581,18 +582,12 @@ func portalDownloads(c *gin.Context, settings map[string]string) ([]portal.Platf
 
 	platforms := []portal.Platform{
 		item("Windows", "x64 · .exe 安装程序", settings["portal.client_download_win"], "win-x64"),
-		// macOS 只出 Apple 芯片(arm64)包(见 desktop package.json 的 build.mac.arch):
-		// 文案必须写明,否则 Intel Mac 用户会下到一个装不上的包。
-		item("macOS", "Apple 芯片 (M 系列) · .dmg 磁盘映像", settings["portal.client_download_mac"], "mac-universal"),
-		item("Linux", "x64 · .AppImage / .deb", settings["portal.client_download_linux"], "linux-x64"),
 	}
 
-	// 有平台因来源不安全而失去内置入口(且管理员没配自有地址)→ 说明原因。
+	// 有平台因来源不可访问而失去内置入口(且管理员没配自有地址)→ 说明原因。
 	note := ""
-	if !origin.OK() && (pick(settings["portal.client_download_win"]) == "" ||
-		pick(settings["portal.client_download_mac"]) == "" ||
-		pick(settings["portal.client_download_linux"]) == "") {
-		note = "本服务端当前无法提供安全(https)的安装包地址:" + origin.Reason + "。"
+	if !origin.OK() && pick(settings["portal.client_download_win"]) == "" {
+		note = "本服务端当前无法提供可访问的安装包地址:" + origin.Reason + "。"
 	}
 	return platforms, note
 }
@@ -705,6 +700,7 @@ func registerProductionRoutes(r *gin.Engine, d productionDeps) {
 		Telemetry:   telemetry.NewHandlers(d.DB),
 		Gateway:     llmgateway.NewHandlers(d.DB),
 		Reports:     reports.NewHandlers(d.DB),
+		Managed:     managedconfig.NewHandlers(d.DB),
 		// WASM 应用平台操作面（§8）。
 		Wasm: d.Wasm,
 	})

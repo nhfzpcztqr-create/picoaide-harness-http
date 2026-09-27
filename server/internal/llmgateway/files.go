@@ -140,6 +140,15 @@ func (a *API) filesTarget(c *gin.Context, suffix string) (*Upstream, string, int
 			"未配置可用的 DeepSeek 上游(文件接口仅支持 DeepSeek)")
 		return nil, "", 0, false
 	}
+	if a.keyPool != nil {
+		selected, lease, err := a.upstreamWithKey(up)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusServiceUnavailable, "UPSTREAM", "没有可用的上游 API Key，请稍后重试")
+			return nil, "", 0, false
+		}
+		up = selected
+		c.Set("gateway.file.key_lease", lease)
+	}
 	return &up, filesURL(up.BaseURL, suffix), user.ID, true
 }
 
@@ -152,6 +161,12 @@ func (a *API) filesHTTPClient() *http.Client {
 		Transport:     a.client.Transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+}
+
+func fileLease(c *gin.Context) *keyLease {
+	value, _ := c.Get("gateway.file.key_lease")
+	lease, _ := value.(*keyLease)
+	return lease
 }
 
 // fileNotFoundMessage 是"文件不存在 / 不属于你"的统一文案。
@@ -247,6 +262,7 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 	req.ContentLength = int64(len(outBody))
 	resp, err := a.filesHTTPClient().Do(req)
 	if err != nil {
+		recordLeaseResponse(fileLease(c), nil, err)
 		writeFilesTransportError(c, nil)
 		return
 	}
@@ -256,8 +272,10 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 	defer resp.Body.Close()
 	body, ok := readFilesResponseBody(c, resp)
 	if !ok {
+		recordLeaseResponse(fileLease(c), resp, nil)
 		return
 	}
+	recordLeaseResponse(fileLease(c), resp, nil)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if err := a.recordUploadedFile(userID, body, lim.fileExpiry); err != nil {
 			// R4-C-1：这个 id 正被回收器删除（登记路径拒绝转手）。**不能**把上游
@@ -786,14 +804,17 @@ func (a *API) doFilesMeta(c *gin.Context, up *Upstream, method, target string) (
 	req.Header.Set("Accept", "application/json")
 	resp, err := a.filesHTTPClient().Do(req)
 	if err != nil {
+		recordLeaseResponse(fileLease(c), nil, err)
 		writeFilesTransportError(c, nil) // 无请求体 ⇒ 一律上游侧失败
 		return nil, nil, false
 	}
 	defer resp.Body.Close()
 	body, ok := readFilesResponseBody(c, resp)
 	if !ok {
+		recordLeaseResponse(fileLease(c), resp, nil)
 		return nil, nil, false
 	}
+	recordLeaseResponse(fileLease(c), resp, nil)
 	return resp, body, true
 }
 

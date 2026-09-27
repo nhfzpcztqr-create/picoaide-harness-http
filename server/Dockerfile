@@ -9,39 +9,51 @@
 # PicoAide 服务端多阶段构建(架构设计 §2 目录、计划 Task 4.6)
 # 运行镜像含 /data 挂载卷;密钥/数据库落在 /data,部署时以 volume 持久化。
 #
-# ⚠️ 本文件依赖**两个命名构建上下文**(缺了 BuildKit 会把名字当镜像引用去拉取,
+# ⚠️ 本文件依赖**四个命名构建上下文**(缺了 BuildKit 会把名字当镜像引用去拉取,
 # 报错完全不指向真实原因 —— 本项目历史上正是被 Docker Hub 可达性坑过):
 #   clientassets   客户端安装包 + CLIENT-RELEASE.json(随镜像分发;目录必须存在,可为空)
 #   channelassets  渠道内容目录(内含 <CHANNEL>/;目录必须存在,可为空)
+#   gomodcache     Go module 缓存(联网构建也要传空目录)
+#   npmcache       npm 缓存(联网构建也要传空目录)
 #
 # 构建(本地单平台;`make docker-image` 就是这条,CHANNEL 缺省 official):
-#   mkdir -p client-assets/client channels-context/official   # 空目录合法
+#   mkdir -p client-assets/client channels-context/official .offline-go-modcache .offline-npm-cache
 #   docker build --build-arg VERSION=0.4.0 --build-arg CHANNEL=official \
 #     --build-context clientassets=./client-assets \
 #     --build-context channelassets=./channels-context \
+#     --build-context gomodcache=./.offline-go-modcache \
+#     --build-context npmcache=./.offline-npm-cache \
 #     -t picoaide-harness-server:v0.4.0 .
 # 构建(单平台 amd64,CI 用;渠道内容只放本渠道一个目录):
 #   docker buildx build --platform linux/amd64 \
 #     --build-arg VERSION=0.4.0 --build-arg CHANNEL=<channel-id> \
 #     --build-context clientassets=./client-assets \
 #     --build-context channelassets=./channels-context \
+#     --build-context gomodcache=./.offline-go-modcache \
+#     --build-context npmcache=./.offline-npm-cache \
 #     -t picoaide-harness-server:v0.4.0 --load .
 # 发布镜像不经任何镜像仓库:CI 在 tag 时逐渠道构建 → docker save → zip → 更新服务器
 # (scripts/ci-build-channel-images.sh);客户侧 docker load,见 docs/deploy/AI-DEPLOY.md。
 
+ARG OFFLINE_BUILD=0
+ARG RUNTIME_BASE=alpine:3.21
+
 # --- Stage 1: webadmin(go:embed dist 需要预构建产物) ---
-FROM node:24-alpine AS webadmin
+FROM node:24-bookworm-slim AS webadmin
+ARG OFFLINE_BUILD
 WORKDIR /build
 # webadmin 不再编译期注入任何品牌素材:logo/名称全部来自渠道内容
 # (GET /api/client/v2/channel,镜像内 /opt/picoaide/channel/)。仓库里不留
 # 品牌描述,因此这里也不需要 root 构建上下文(2026-09-10 审计)。
 COPY webadmin/package.json webadmin/package-lock.json ./
-RUN npm ci
+COPY --from=npmcache / /root/.npm/
+RUN if [ "$OFFLINE_BUILD" = "1" ]; then npm ci --offline --cache /root/.npm; else npm ci; fi
 COPY webadmin/ ./
 RUN npm run build
 
 # --- Stage 2: 服务端静态编译(CGO_ENABLED=0,modernc sqlite 纯 Go) ---
 FROM golang:1.26-alpine AS build
+ARG OFFLINE_BUILD
 WORKDIR /src
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -51,7 +63,8 @@ ARG VERSION=dev
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=$GOPROXY
 COPY go.mod go.sum ./
-RUN go mod download
+COPY --from=gomodcache / /go/pkg/mod/
+RUN if [ "$OFFLINE_BUILD" = "1" ]; then GOPROXY=off GOSUMDB=off go mod download; else go mod download; fi
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 # 内置演示应用（员工自建应用平台，见 internal/wasmapp/appseed）：
@@ -99,7 +112,8 @@ RUN set -eu; mkdir -p /demo/packed \
  && chmod -R a+rX /demo/packed
 
 # --- Stage 3: 运行镜像(CA 证书用于 HTTPS 上游/LDAPS;entrypoint 降权;数据卷 0700) ---
-FROM alpine:3.21
+FROM ${RUNTIME_BASE}
+ARG OFFLINE_BUILD
 # 可选：构建时通过 --build-arg ALPINE_MIRROR=https://mirrors.aliyun.com/alpine 切换国内镜像
 ARG ALPINE_MIRROR
 RUN if [ -n "$ALPINE_MIRROR" ]; then \
@@ -111,8 +125,12 @@ RUN if [ -n "$ALPINE_MIRROR" ]; then \
 # 也读不到别的应用的 SQLite 库。
 # ⚠️ 容器里 bwrap 需要非特权 user namespace 或 `--cap-add SYS_ADMIN`（见部署文档）；
 # 不可用时 compile.New 按 PICOAI_COMPILE_ISOLATION 决定回落还是拒绝启动。
-RUN apk add --no-cache ca-certificates tzdata su-exec bubblewrap && \
-    adduser -D -u 10001 -h /app picoaide
+RUN if [ "$OFFLINE_BUILD" = "1" ]; then \
+      id picoaide >/dev/null 2>&1 || adduser -D -u 10001 -h /app picoaide; \
+    else \
+      apk add --no-cache ca-certificates tzdata su-exec bubblewrap && \
+      id picoaide >/dev/null 2>&1 || adduser -D -u 10001 -h /app picoaide; \
+    fi
 WORKDIR /app
 COPY --from=demoassets /demo/packed /opt/picoaide/demo-apps
 COPY --from=build /out/picoaide-server /app/picoaide-server
@@ -124,7 +142,7 @@ RUN chmod +x /app/entrypoint.sh
 # 客户侧不需要仓库、不需要外网拉配置:一个 docker run 就能把
 # compose + Caddyfile + .env.example + VERSION 导到部署目录。
 # (这些是编排文件,只被 entrypoint 拷出,与 webadmin 的 go:embed 无关。)
-COPY docker-compose.yml Caddyfile.internal Caddyfile.autocert Caddyfile.manual .env.example /opt/picoaide/deploy/
+COPY docker-compose.yml docker-compose.http.yml Caddyfile.internal Caddyfile.http Caddyfile.autocert Caddyfile.manual .env.example /opt/picoaide/deploy/
 # 编译期注入的版本号:entrypoint 落客户端资产路径、updatecheck 比对、运维核对三处共用
 # 注意:ARG 不跨 stage 继承,必须在 Stage 3 重新声明(否则此处 VERSION 为空,写出空 VERSION 文件)
 ARG VERSION=dev

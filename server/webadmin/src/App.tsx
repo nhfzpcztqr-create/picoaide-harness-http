@@ -16,6 +16,7 @@ import { ROUTER_FUTURE } from './lib/router-future'
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
 // 当前路由页面;其余页面(含各自依赖)在导航时按需加载,降低首屏体积。
 const UsersPage = lazy(() => import('./pages/Users'))
+const ManagedConfig = lazy(() => import('./pages/ManagedConfig'))
 const Departments = lazy(() => import('./pages/Departments'))
 const Gateway = lazy(() => import('./pages/Gateway'))
 const GatewayFiles = lazy(() => import('./pages/GatewayFiles'))
@@ -357,6 +358,7 @@ export default function App() {
                 <Routes>
                   <Route path="/" element={<Navigate to={landingPath} />} />
                   <Route path="/users" element={<UsersPage />} />
+                  <Route path="/managed-config" element={<ManagedConfig />} />
                   <Route path="/departments" element={<Departments />} />
                   <Route path="/gateway" element={<Gateway />} />
                   <Route path="/gateway-files" element={<GatewayFiles />} />

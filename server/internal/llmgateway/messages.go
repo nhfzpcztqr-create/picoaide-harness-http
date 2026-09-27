@@ -190,6 +190,8 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.WriteHeader(resp.StatusCode)
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
@@ -393,12 +395,18 @@ func (a *API) handleMessages(c *gin.Context) {
 	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
-		resp, err = a.forwardAnthropic(c, &ups[i], outbound, req.Stream)
+		attempt, lease, keyErr := a.upstreamWithKey(ups[i])
+		if keyErr != nil {
+			err = keyErr
+		} else {
+			resp, err = a.forwardAnthropic(c, &attempt, outbound, req.Stream)
+			recordLeaseResponse(lease, resp, err)
+		}
 		if a.rejectForwardError(c, usageID, err) {
 			return
 		}
 		if err == nil {
-			respSecrets = []string{ups[i].APIKey}
+			respSecrets = []string{attempt.APIKey}
 			chosenProviderID = ups[i].ID
 			if usageID > 0 {
 				if serr := serverstore.SetUsageProvider(a.DB, usageID, ups[i].ID); serr != nil {
