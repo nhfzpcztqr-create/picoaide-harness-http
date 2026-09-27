@@ -149,7 +149,7 @@ func loadUpstreamsDB(db *sql.DB) ([]Upstream, error) {
 			u.APIKey = key
 			// The legacy provider key remains the fallback. A key pool is selected
 			// per request so cooldown state can change without rebuilding the route cache.
-			if keyRows, keyErr := tx.Query(`SELECT id, api_key_enc FROM gateway_provider_api_keys WHERE provider_id = ? AND enabled = 1 ORDER BY priority, id`, r.id); keyErr == nil {
+			if keyRows, keyErr := tx.Query(`SELECT id, api_key_enc FROM gateway_provider_api_keys WHERE provider_id = ? AND enabled = TRUE ORDER BY priority, id`, r.id); keyErr == nil {
 				for keyRows.Next() {
 					var kid int64
 					var kenc string
