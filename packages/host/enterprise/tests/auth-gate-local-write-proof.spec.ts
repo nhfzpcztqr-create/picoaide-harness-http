@@ -151,6 +151,7 @@ function harness(session: Session | null, fence?: ReturnType<typeof browserFence
       getSession: () => session,
       setSession: vi.fn(),
       clear: vi.fn(),
+      getLastServer: () => null,
     },
     webServer: {
       tapIndex: () => () => {},

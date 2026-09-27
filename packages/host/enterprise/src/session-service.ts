@@ -27,6 +27,16 @@ export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
   return join(dshHomeSafe({ env }), 'session.json')
 }
 
+/**
+ * Resolve the last-server file: `$DSH_HOME/last-server.json`.
+ * Stores the most recently used server URL so users don't have to re-enter
+ * it after logging out. The URL itself is not a secret, but the file is
+ * still 0600 for consistency with other data-root files.
+ */
+export function defaultLastServerFile(env: NodeJS.ProcessEnv = process.env): string {
+  return join(dshHomeSafe({ env }), 'last-server.json')
+}
+
 /** Cordis event emitted whenever the session is set, restored, or cleared. */
 export { SESSION_CHANGED_EVENT } from '@picoaide/dsh-host-locale/session-events'
 
@@ -78,15 +88,18 @@ declare module '@deepseek-ai/cordis' {
  *
  * `tokenFile` defaults to `$DSH_HOME/session.json`. `deepLinkScheme` 由桌面壳在
  * 组装期注入（渠道构建是客户自己的 scheme，如 `acmeai`）；缺省官方值。
+ * `lastServerFile` defaults to `$DSH_HOME/last-server.json`.
  */
 export interface Config {
   tokenFile?: string
   deepLinkScheme?: string
+  lastServerFile?: string
 }
 
 export const Config: z<Config> = z.object({
   tokenFile: z.string(),
   deepLinkScheme: z.string(),
+  lastServerFile: z.string(),
 })
 
 /**
@@ -98,15 +111,19 @@ export default class SessionService extends Service {
 
   private session: Session | null = null
   private readonly tokenFile: string
+  private readonly lastServerFile: string
   private restoreDone = false
   // F7(审计 2026-09-11):持久化代际 —— persist 是异步的(先 await 动态
   // import),若期间 clear()/setSession() 已发生,迟到的写入会让已登出的
   // token 在磁盘"复活"。每次会话变化递增,persist 写盘前校验代际。
   private persistEpoch = 0
+  private lastServer: string | null = null
+  private lastServerLoaded = false
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'picoSession')
     this.tokenFile = config.tokenFile ?? defaultTokenFile()
+    this.lastServerFile = config.lastServerFile ?? defaultLastServerFile()
     // picoaide:// deep-link auth (OIDC/OpenID callback): store the session
     // when a valid link arrives. Emits pico/session-changed → auth-gate
     // reloads into the app (login page poll sees loggedIn).
@@ -147,10 +164,69 @@ export default class SessionService extends Service {
       const message = cause instanceof Error ? cause.message : String(cause)
       this.ctx.logger?.warn(`[pico] session token could not be persisted (${this.tokenFile}): ${message}`)
     })
+    // Also remember the server URL for the next login (even if token expires
+    // or the user logs out, they don't have to re-type the address).
+    this.saveLastServer(session.serverURL)
     this.ctx.emit(SESSION_CHANGED_EVENT, session)
   }
 
+  /**
+   * Get the most recently used server URL.
+   * Returns null if no server has been used yet or the stored file is invalid.
+   */
+  getLastServer(): string | null {
+    if (!this.lastServerLoaded) {
+      this.lastServer = this.loadLastServerSync()
+      this.lastServerLoaded = true
+    }
+    return this.lastServer
+  }
+
+  /**
+   * Save the given server URL as the most recently used one.
+   * Called on successful login and on logout (to preserve the address across
+   * sign-out so the user lands directly on the username/password step).
+   */
+  saveLastServer(serverURL: string): void {
+    this.lastServer = serverURL
+    this.lastServerLoaded = true
+    try {
+      writeFileSync(this.lastServerFile, JSON.stringify({ serverURL }), { mode: TOKEN_FILE_MODE })
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      this.ctx.logger?.warn(`[pico] last-server could not be persisted (${this.lastServerFile}): ${message}`)
+    }
+  }
+
+  /**
+   * Clear the remembered server address (e.g. when the user explicitly
+   * switches to a different server from the login page).
+   */
+  clearLastServer(): void {
+    this.lastServer = null
+    this.lastServerLoaded = true
+    try { unlinkSync(this.lastServerFile) } catch { /* absent is fine */ }
+  }
+
+  private loadLastServerSync(): string | null {
+    try {
+      if (!existsSync(this.lastServerFile)) return null
+      const raw = readFileSync(this.lastServerFile, 'utf8')
+      const data = JSON.parse(raw) as { serverURL?: string }
+      return typeof data.serverURL === 'string' && data.serverURL.length > 0 ? data.serverURL : null
+    } catch {
+      return null
+    }
+  }
+
   clear(): void {
+    // Preserve the server URL before wiping the session so the login page
+    // can skip the "enter server address" step and go straight to username
+    // /password. The in-memory copy is enough for this render, and we also
+    // persist it so the next app launch also remembers it.
+    if (this.session?.serverURL) {
+      this.saveLastServer(this.session.serverURL)
+    }
     this.session = null
     this.persistEpoch++ // F7: 使所有在途 persist 失效,不再复活旧 token
     try { unlinkSync(this.tokenFile) } catch { /* absent is fine */ }

@@ -293,6 +293,7 @@ async function hostHarness(config: Partial<Config> = {}, current: Session | null
       getSession: () => current,
       setSession: vi.fn(),
       clear: vi.fn(),
+      getLastServer: () => null,
     },
     webServer: {
       tapIndex: (cb: (html: string) => string) => { indexCb = cb; return () => {} },

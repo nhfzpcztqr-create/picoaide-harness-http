@@ -370,7 +370,12 @@ async function acquireSkillDirLock(skillsDir: string, name: string, waitMs: numb
       return async () => {
         // 只删自己创建的那个 inode：祖先被换走/已被别人抢占时不误删。
         const now = await lstat(lockPath).catch(() => undefined)
-        if (now !== undefined && now.dev === stat.dev && now.ino === stat.ino) {
+        if (now === undefined) return
+        // Windows 上 lstat 返回 dev=0(已知行为),而 fstat(handle) 返回真实设备号。
+        // 两者 ino 一致(FILE_ID),设备号任一侧为 0 时跳过设备比较。
+        // 仍校验 ino:确保我们删的是自己创建的那个文件,而不是被替换后的文件。
+        const sameDev = stat.dev === 0 || now.dev === 0 || now.dev === stat.dev
+        if (sameDev && now.ino === stat.ino) {
           await rm(lockPath, { force: true }).catch(() => { /* 留给陈旧判定 */ })
         }
       }

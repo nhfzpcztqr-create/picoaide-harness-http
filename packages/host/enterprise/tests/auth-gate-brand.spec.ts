@@ -26,6 +26,7 @@ function serveLoginPage(config: Config, loggedIn = false): string {
       isRestored: () => true,
       isLoggedIn: () => loggedIn,
       getSession: () => null,
+      getLastServer: () => null,
     },
     webServer: {
       tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },

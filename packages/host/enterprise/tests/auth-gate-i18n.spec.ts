@@ -222,7 +222,7 @@ function bootHarness(config: Config = {}): Harness {
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
     get: (name: string) => (name === 'desktopRuntime' ? runtime : undefined),
-    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
+    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null, getLastServer: () => null },
     webServer: {
       tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },
       register: (route: { path: string, handler: (req: IncomingMessage, res: ServerResponse) => unknown }) => {
@@ -309,7 +309,7 @@ describe('语言按请求 / 按渲染解析（不许冻结）', () => {
     const ctx = {
       effect: (fn: () => unknown) => { fn() },
       get: (name: string) => (name === 'desktopRuntime' ? runtime : undefined),
-      picoSession: { isRestored: () => false, isLoggedIn: () => false, getSession: () => null },
+      picoSession: { isRestored: () => false, isLoggedIn: () => false, getSession: () => null, getLastServer: () => null },
       webServer: {
         tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },
         register: (route: { path: string, handler: (req: IncomingMessage, res: ServerResponse) => unknown }) => {

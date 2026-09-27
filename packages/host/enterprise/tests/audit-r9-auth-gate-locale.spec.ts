@@ -28,7 +28,7 @@ function bootWebFace(options: BootOptions = {}): { index: (html: string) => stri
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
     get: (name: string) => services[name],
-    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
+    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null, getLastServer: () => null },
     webServer: {
       tapIndex: (callback: (html: string) => string) => { index = callback; return () => {} },
       register: (route: { path: string, handler: (req: IncomingMessage, res: ServerResponse) => unknown }) => {

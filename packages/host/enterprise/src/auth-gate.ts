@@ -253,7 +253,7 @@ export function renderLoginPage(locale: HostLocale): string {
     <h1>${c.connectTitle}</h1>
     <div class="tagline">${c.connectTagline}</div>
     <form id="f1">
-      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" __DEFAULT_SERVER_MARK__ autocomplete="off" spellcheck="false" required>
+      <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" __DEFAULT_SERVER_MARK__ __LAST_SERVER_MARK__ autocomplete="off" spellcheck="false" required>
       <button type="submit" id="next-btn">${c.next}</button>
       <div class="err" id="err-step1"></div>
     </form>
@@ -362,12 +362,18 @@ export function renderLoginPage(locale: HostLocale): string {
     await connect(document.getElementById('server').value.trim())
   })
 
-  // 渠道包预置了服务端域名 → 跳过"输入服务端地址"这一步,直接进登录:
-  // 员工看到的第一个界面就是账号密码(或点一下就用浏览器 SSO 登录),
-  // 而不是"请输入你公司的地址"。
+  // 渠道包预置了服务端域名 / 用户上次登录过的地址 → 跳过"输入服务端地址"
+  // 这一步,直接进登录:员工看到的第一个界面就是账号密码(或点一下就用浏览器
+  // SSO 登录),而不是"请输入你公司的地址"。
   //
-  // 判据是**服务端写的标记**(data-default-server),不是"输入框有值":浏览器
-  // 在 reload 时会恢复表单值,用"有值"判断会让未渠道化的构建也触发自动连接。
+  // 判据是**服务端写的标记**,不是"输入框有值":浏览器在 reload 时会恢复表单值,
+  // 用"有值"判断会让未渠道化的构建也触发自动连接。
+  //
+  // 两种标记:
+  //   - data-default-server="1" : 编译期内置地址(渠道包),自动连接且如果只有
+  //     浏览器登录方式则自动跳转。
+  //   - data-last-server="1"    : 用户记住的地址(上次登录过),自动连接到 Step 2,
+  //     但不自动发起浏览器 SSO,让用户确认账号密码。
   //
   // 写法注意:这里刻意用"函数声明 + void 调用",而不是把 IIFE 直接写在行首。
   // 本脚本是无分号(ASI)风格,而紧跟在一个调用语句之后的左圆括号不会触发自动
@@ -378,20 +384,25 @@ export function renderLoginPage(locale: HostLocale): string {
   // 而"脚本能被 new Function 解析"的语法测试**抓不到**(它语法上是合法的)。
   async function autoConnect() {
     var serverInput = document.getElementById('server')
-    if (serverInput.getAttribute('data-default-server') !== '1') return
+    var hasDefault = serverInput.getAttribute('data-default-server') === '1'
+    var hasLast = serverInput.getAttribute('data-last-server') === '1'
+    if (!hasDefault && !hasLast) return
     if (serverInput.value.trim() === '') return
     var ok = await connect(serverInput.value.trim())
     if (!ok) return
-    // 只有浏览器方式可用(纯 OIDC/OpenID 部署)时直接发起跳转,员工不必再点一次。
-    var hasPassword = currentMethods.some(function (m) {
-      return m.name === 'local' || m.name === 'ldap'
-    })
-    if (!hasPassword && currentMethods.length > 0 && browserBtn.style.display !== 'none') {
-      browserBtn.click()
-    } else {
-      var username = document.getElementById('username')
-      if (username && username.style.display !== 'none') username.focus()
+    // 只有内置地址(渠道包)且只有浏览器方式可用(纯 OIDC/OpenID 部署)时
+    // 才直接发起跳转;记住的地址不自动跳浏览器 SSO,让用户主动选择。
+    if (hasDefault) {
+      var hasPassword = currentMethods.some(function (m) {
+        return m.name === 'local' || m.name === 'ldap'
+      })
+      if (!hasPassword && currentMethods.length > 0 && browserBtn.style.display !== 'none') {
+        browserBtn.click()
+        return
+      }
     }
+    var username = document.getElementById('username')
+    if (username && username.style.display !== 'none') username.focus()
   }
   void autoConnect()
 
@@ -1265,18 +1276,33 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * 组装登录页：文案与 `<html lang>` 取 `locale`，品牌名/预置地址仍在这里做
    * 上下文各自的转义替换（`__*__` 占位符单遍填充，见 fillPlaceholders）。
+   *
+   * 服务端地址来源优先级:
+   *   1. configuredServer（渠道包/编译期内置）—— 最高优先级，不显示返回按钮
+   *   2. picoSession.getLastServer()（最近使用的地址，用户上次登录过的）
+   *      —— 自动进入 Step 2，但允许返回修改
+   *   3. 空字符串 —— 显示 Step 1，让用户手动输入
    * @param locale - 本次请求的语言。
    * @returns 可直接写进响应的 HTML。
    */
-  const loginPage = (locale: HostLocale): string => fillPlaceholders(renderLoginPage(locale), {
-    __DEFAULT_SERVER__: () => defaultServer,
-    // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
-    __DEFAULT_SERVER_MARK__: () => (configuredServer === '' ? '' : 'data-default-server="1"'),
-    // 内置了地址就不再提供"返回修改服务端地址"（见 backButtonHtml 的说明）。
-    __BACK_BUTTON__: () => (configuredServer === '' ? backButtonHtml(locale) : ''),
-    __BRAND_NAME__: () => brandTitle,
-    __BRAND_JSON__: () => brandScriptLiteral(brand),
-  })
+  const loginPage = (locale: HostLocale): string => {
+    const remembered = configuredServer === '' ? ctx.picoSession.getLastServer() ?? '' : ''
+    const effectiveDefault = configuredServer !== '' ? defaultServer : (remembered !== '' ? escapeHtmlAttribute(remembered) : '')
+    const hasRemembered = configuredServer === '' && remembered !== ''
+    return fillPlaceholders(renderLoginPage(locale), {
+      __DEFAULT_SERVER__: () => effectiveDefault,
+      // 只有**确实配了**内置域名才打 default-server 标记。
+      __DEFAULT_SERVER_MARK__: () => (configuredServer === '' ? '' : 'data-default-server="1"'),
+      // 记住的地址(非内置)打 last-server 标记:页面脚本自动进入 Step 2,
+      // 但仍提供"返回修改"按钮。
+      __LAST_SERVER_MARK__: () => (hasRemembered ? 'data-last-server="1"' : ''),
+      // 内置了地址就不再提供"返回修改服务端地址"（见 backButtonHtml 的说明）。
+      // 用户记住的地址(remembered)仍然提供返回按钮,允许切换服务器。
+      __BACK_BUTTON__: () => (configuredServer === '' ? backButtonHtml(locale) : ''),
+      __BRAND_NAME__: () => brandTitle,
+      __BRAND_JSON__: () => brandScriptLiteral(brand),
+    })
+  }
 
   /**
    * 组装会话恢复过渡页（`__BRAND_NAME__` 替换同登录页，同样单遍填充）。

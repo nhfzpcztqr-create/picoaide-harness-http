@@ -99,14 +99,16 @@ describe('auth-gate LOGIN_HTML inline script', () => {
 
   it('skips the server-address step when the channel package preconfigured a domain', () => {
     const script = loginScript()
-    // 渠道包预置域名 → 直接进登录,员工第一眼就是账号密码(或一次点击的浏览器
-    // SSO),而不是"请输入你公司的地址"。
+    // 渠道包预置域名 / 用户记住的地址 → 直接进登录,员工第一眼就是账号密码
+    // (或一次点击的浏览器 SSO),而不是"请输入你公司的地址"。
     expect(script).toContain('function connect(server)')
     expect(script).toContain('autoConnect')
     // 判据必须是**服务端写的标记**,不是"输入框有值":浏览器 reload 会恢复表单值,
     // 用"有值"判断会让未渠道化的构建在登录后重新触发自动连接、把页面拽回登录流程
     // (2026-09-10 实测:客户端 E2E 从 13/13 掉到 5/13 的根因)。
-    expect(script).toContain("getAttribute('data-default-server') !== '1'")
+    // 两种标记: data-default-server(内置地址) 和 data-last-server(记住的地址)。
+    expect(script).toContain("getAttribute('data-default-server') === '1'")
+    expect(script).toContain("getAttribute('data-last-server') === '1'")
     // 自动连接必须走"函数声明 + void 调用",不能把 IIFE 写在行首:
     // 本脚本是无分号风格,行首左圆括号会被解析成"调用上一行的返回值",
     // 一执行就抛错并让后面所有语句(含 #f2 登录处理)不再注册。
@@ -165,7 +167,7 @@ function servedLoginPage(config: Config): string {
   let index: ((html: string) => string) | undefined
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
-    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null },
+    picoSession: { isRestored: () => true, isLoggedIn: () => false, getSession: () => null, getLastServer: () => null },
     webServer: {
       tapIndex: (cb: (html: string) => string) => { index = cb; return () => {} },
       register: () => () => {},
@@ -191,7 +193,11 @@ describe('auth-gate login page: 内置地址后不再提供"修改服务端地�
     const html = servedLoginPage({})
     expect(html).toContain('id="back-btn"')
     expect(html).toContain('修改服务端地址')
-    expect(html).not.toContain('data-default-server="1"')
+    // input 元素上不应有 default-server 标记（脚本注释里的说明文字不算）。
+    const inputMatch = html.match(/<input[^>]*id="server"[^>]*>/)
+    expect(inputMatch, 'login page must have server input').not.toBeNull()
+    expect(inputMatch![0]).not.toContain('data-default-server="1"')
+    expect(inputMatch![0]).not.toContain('data-last-server="1"')
   })
 
   it('脚本对"按钮不存在"是安全的（否则后面的登录处理全都注册不上）', () => {
