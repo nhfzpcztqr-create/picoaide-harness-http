@@ -289,7 +289,11 @@ export async function initSentry(
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : String(cause)
     // D1:失败**不再静默** —— 状态可查 + warn 会落盘(桌面默认日志阈值 info)。
-    console.warn('error-reporting: Sentry init 失败(降级不启用):', cause)
+    // 拼成字符串输出:直接传 Error 对象会因 message 不可枚举而丢失关键信息。
+    const detail = cause instanceof Error && cause.stack
+      ? `${cause.name}: ${cause.message}\n${cause.stack}`
+      : reason
+    console.warn('error-reporting: Sentry init 失败(降级不启用):', detail)
     status = { state: 'failed', reason, ...(dsnHost === undefined ? {} : { dsnHost }) }
     sentry = null
     return { ok: false, reason }
@@ -581,15 +585,26 @@ export function apply(ctx: Context): void {
       // bootstrap 失败不阻断;但现在状态可查、日志会落盘。
       const reason = cause instanceof Error ? cause.message : String(cause)
       status = { state: 'config_unavailable', reason }
-      console.warn('[error-reporting] bootstrap 失败,不上报:', cause)
-      ctx.logger?.warn?.('error-reporting: bootstrap 失败,不上报:', cause)
+      // 注意:直接传 Error 对象给 logger 可能导致 message 丢失(Error.message
+      // 不可枚举,JSON 序列化时只剩 name/kind 等可枚举属性),所以这里拼成
+      // 字符串再输出,确保排障时能看到完整原因。
+      const detail = cause instanceof Error && cause.stack
+        ? `${cause.name}: ${cause.message}\n${cause.stack}`
+        : reason
+      console.warn('[error-reporting] bootstrap 失败,不上报:', detail)
+      ctx.logger?.warn?.('error-reporting: bootstrap 失败,不上报:', detail)
       void reportErrorReportingStatus(session, status)
     }
   }
 
   const reportFailure = (cause: unknown): void => {
     try {
-      ctx.logger.error(cause)
+      const detail = cause instanceof Error && cause.stack
+        ? `${cause.name}: ${cause.message}\n${cause.stack}`
+        : cause instanceof Error
+          ? cause.message
+          : String(cause)
+      ctx.logger.error(detail)
     } catch {
       // logger 不可用（极端环境/已关闭 context）时静默:错误上报失败不阻断主机。
     }

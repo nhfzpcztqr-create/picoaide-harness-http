@@ -553,6 +553,70 @@ function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: str
     readFileSync(join(defaultRepoRoot(), 'packages/host/desktop/package.json'), 'utf8'),
   ) as { build?: Record<string, unknown> }
   const names = context.artifactNames
+  const target = isAbsolute(outputPath) ? outputPath : join(defaultRepoRoot(), outputPath)
+  const targetDir = dirname(target)
+  // 落点可能还不存在（缺省是包根 `temp/`，一个纯 scratch 目录）。
+  mkdirSync(targetDir, { recursive: true })
+
+  // --- NSIS include:修复命令行 -D 宏的中文乱码 ---
+  // 根因:electron-builder 通过 makensis -DNAME=值 把 productName/shortcutName 等传给 NSIS。
+  // 命令行参数在简体中文 Windows 上走系统代码页(CP936/GBK),而 NSIS 脚本体走
+  // -INPUTCHARSET UTF8,两边不同步导致 UTF-8 的中文被按 GBK 解析(如「神机」→「绁炴満」)。
+  // 解法:
+  //   1. exe 文件名用英文 slug(PRODUCT_FILENAME = slug),从根源避开编码问题;
+  //   2. 显示相关的中文宏(PRODUCT_NAME / SHORTCUT_NAME / MENU_FILENAME)通过
+  //      UTF-8 编码的 .nsh include 在脚本体内 !undef+!define 重写,
+  //      让它们走 NSIS 脚本的 UTF-8 解析路径。
+  // 只在 productName 含非 ASCII 时启用,纯 ASCII 渠道(官方)完全不受影响。
+  const hasNonAsciiName = /[^\x00-\x7F]/.test(context.productName)
+  const nsisIncludeName = 'channel-nsis-defines.nsh'
+  const nsisIncludePath = join(targetDir, nsisIncludeName)
+  if (hasNonAsciiName) {
+    const lines = [
+      '; 由 scripts/channel-build.ts 生成 —— 渠道 ' + context.channelId + ' 的 NSIS 宏覆盖。',
+      '; 修复:简体中文 Windows 上 -D 命令行宏走 CP936(GBK),脚本走 UTF-8,不同步导致中文乱码。',
+      ';',
+      '; 覆盖 PRODUCT_NAME:安装程序标题、关于对话框、Branding 文本等显示名。',
+      '!ifdef PRODUCT_NAME',
+      '  !undef PRODUCT_NAME',
+      '!endif',
+      `!define PRODUCT_NAME "${context.productName}"`,
+      ';',
+      '; 覆盖 SHORTCUT_NAME:开始菜单与桌面快捷方式的显示名。',
+      '!ifdef SHORTCUT_NAME',
+      '  !undef SHORTCUT_NAME',
+      '!endif',
+      `!define SHORTCUT_NAME "${context.shortcutName}"`,
+      ';',
+      '; 覆盖 MENU_FILENAME:开始菜单文件夹名。',
+      '!ifdef MENU_FILENAME',
+      '  !undef MENU_FILENAME',
+      '!endif',
+      `!define MENU_FILENAME "${context.shortcutName}"`,
+      '',
+    ]
+    writeFileSync(nsisIncludePath, lines.join('\r\n'), 'utf8')
+  }
+
+  const nsis: Record<string, unknown> = {
+    ...record(manifest.build?.nsis),
+    artifactName: names.nsis,
+    shortcutName: context.shortcutName,
+  }
+  if (hasNonAsciiName) {
+    nsis.include = nsisIncludePath
+  }
+
+  const winConfig: Record<string, unknown> = {
+    ...record(manifest.build?.win),
+    artifactName: names.win,
+  }
+  // 中文 productName 时 exe 文件名用英文 slug,避免 NSIS 命令行 -D 参数的 GBK 编码乱码
+  // (如「神机.exe」→「绁炴満.exe」)。快捷方式等显示名仍用中文,由 NSIS include 覆盖。
+  if (hasNonAsciiName) {
+    winConfig.executableName = context.slug
+  }
+
   const config = {
     ...manifest.build,
     productName: context.productName,
@@ -560,8 +624,8 @@ function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: str
     // 数组整体替换:CLI 下标覆盖不可用(见上),配置文件里直接给完整数组。
     protocols: [{ name: context.deepLinkName, schemes: [context.deepLinkScheme] }],
     mac: { ...record(manifest.build?.mac), artifactName: names.mac },
-    win: { ...record(manifest.build?.win), artifactName: names.win },
-    nsis: { ...record(manifest.build?.nsis), artifactName: names.nsis, shortcutName: context.shortcutName },
+    win: winConfig,
+    nsis,
     linux: {
       ...record(manifest.build?.linux),
       artifactName: names.linux,
@@ -569,9 +633,6 @@ function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: str
       synopsis: context.linuxSynopsis,
     },
   }
-  const target = isAbsolute(outputPath) ? outputPath : join(defaultRepoRoot(), outputPath)
-  // 落点可能还不存在（缺省是包根 `temp/`，一个纯 scratch 目录）。
-  mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, `// 由 scripts/channel-build.ts 生成 —— 渠道 ${context.channelId} 的打包配置。
 module.exports = ${JSON.stringify(config, null, 2)}\n`)
   return target
